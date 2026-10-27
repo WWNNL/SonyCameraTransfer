@@ -7,7 +7,7 @@ package dev.rea.sonytransfer
  *   X_TransferStart
  *   X_GetPushRoot        → ObjectID (PushRoot)
  *   Browse(PushRoot)     → 相机端选中的图片列表
- *   对每张：X_TransferProgress → GET 原图 → 保存
+ *   对每张：X_TransferProgress → 下载 TN 缩略图（预览用）→ 流式 GET 原图（带字节进度）→ 保存
  *   X_TransferEnd(0)     → 相机退出图传、关闭热点
  *
  * 单张快路径：PushRoot 为空时读 /DigitalImagingDesc.xml 的 X_CurrentContent_URL。
@@ -16,8 +16,20 @@ class SonyCameraClient(private val log: (String) -> Unit) {
 
     data class Result(val ok: Boolean, val message: String, val savedCount: Int)
 
+    /** 单文件下载进度；totalBytes 来自 res 的 size 属性，可能为 0（未知）。 */
+    data class Progress(
+        val index: Int,
+        val total: Int,
+        val title: String,
+        val downloaded: Long,
+        val totalBytes: Long,
+    )
+
     fun receivePush(
         baseUrl: String,
+        onItems: (List<CameraItem>) -> Unit = {},
+        onThumbnail: (ByteArray) -> Unit = {},
+        onProgress: (Progress) -> Unit = {},
         save: (String, ByteArray) -> Boolean,
     ): Result {
         return try {
@@ -60,9 +72,11 @@ class SonyCameraClient(private val log: (String) -> Unit) {
                 return Result(false, "相机端没有可接收的图片（请先在相机上选图）", 0)
             }
 
+            onItems(items)
+
             var saved = 0
             items.forEachIndexed { index, item ->
-                log("进度 ${index}/${items.size}: ${item.title}")
+                log("接收 ${index + 1}/${items.size}: ${item.title}")
                 runCatching {
                     Upnp.soap(
                         pushUrl, Upnp.XPS, "X_TransferProgress",
@@ -74,7 +88,25 @@ class SonyCameraClient(private val log: (String) -> Unit) {
                     log("跳过 ${item.title}：没有可用 res")
                     return@forEachIndexed
                 }
-                val data = Upnp.httpGetBytes(res.url, 180000)
+                val sizeHint = res.sizeHint ?: 0L
+                onProgress(Progress(index, items.size, item.title, 0, sizeHint))
+
+                // 先取 TN 缩略图做预览（小、快；失败不影响传输）
+                val thumbnail = item.resList.firstOrNull { it.protocolInfo.contains("JPEG_TN") }
+                if (thumbnail != null) {
+                    runCatching { Upnp.httpGetBytes(thumbnail.url, 10_000) }
+                        .onSuccess { onThumbnail(it) }
+                        .onFailure { log("缩略图获取失败: ${it.message}") }
+                }
+
+                val data = Upnp.httpGetBytes(res.url, 180_000) { downloaded, total ->
+                    onProgress(
+                        Progress(
+                            index, items.size, item.title,
+                            downloaded, if (total > 0) total else sizeHint,
+                        ),
+                    )
+                }
                 if (save(item.title, data)) saved++
             }
 

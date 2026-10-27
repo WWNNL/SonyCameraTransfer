@@ -46,7 +46,15 @@ object Upnp {
     const val CDS = "urn:schemas-upnp-org:service:ContentDirectory:1"
     const val XPS = "urn:schemas-sony-com:service:XPushList:1"
 
-    fun httpGetBytes(url: String, timeoutMs: Int = 30000): ByteArray {
+    /**
+     * 流式 GET，可选进度回调（downloadedBytes, totalBytes；total 未知时为 0）。
+     * 回调节流：约每 150ms 一次，末尾必回调一次。
+     */
+    fun httpGetBytes(
+        url: String,
+        timeoutMs: Int = 30000,
+        onProgress: ((Long, Long) -> Unit)? = null,
+    ): ByteArray {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
@@ -56,9 +64,24 @@ object Upnp {
             if (code !in 200..299) {
                 throw IllegalStateException("HTTP $code: $url")
             }
+            val total = conn.contentLengthLong.takeIf { it > 0 } ?: 0L
             conn.inputStream.use { input ->
                 val out = ByteArrayOutputStream()
-                input.copyTo(out)
+                val buffer = ByteArray(64 * 1024)
+                var downloaded = 0L
+                var lastReportAt = 0L
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    out.write(buffer, 0, n)
+                    downloaded += n
+                    val now = System.currentTimeMillis()
+                    if (onProgress != null && (now - lastReportAt >= 150 || n < buffer.size)) {
+                        onProgress(downloaded, total)
+                        lastReportAt = now
+                    }
+                }
+                onProgress?.invoke(downloaded, total)
                 return out.toByteArray()
             }
         } finally {
