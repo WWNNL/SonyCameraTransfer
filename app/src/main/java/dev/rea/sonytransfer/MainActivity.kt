@@ -41,7 +41,7 @@ import java.util.Locale
 
 class MainActivity : Activity() {
 
-    private data class ReceivedImage(val info: ImageInfo, val thumb: Bitmap)
+    private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density by lazy { resources.displayMetrics.density }
@@ -59,6 +59,7 @@ class MainActivity : Activity() {
     private lateinit var currentText: TextView
     private lateinit var stripScroll: HorizontalScrollView
     private lateinit var stripRow: LinearLayout
+    private lateinit var batchButton: Button
 
     // 状态
     private lateinit var cameraWifi: CameraWifi
@@ -129,7 +130,12 @@ class MainActivity : Activity() {
         previewImage = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
             setOnClickListener {
-                currentImageInfo?.let { FullImageViewer(this@MainActivity, it).show() }
+                currentImageInfo?.let { info ->
+                    FullImageViewer(this@MainActivity, info) { updated ->
+                        currentImageInfo = updated
+                        receivedImages.firstOrNull { it.info.uri == updated.uri }?.info = updated
+                    }.show()
+                }
             }
         }
         previewFrame.addView(previewImage, FrameLayout.LayoutParams(
@@ -206,6 +212,18 @@ class MainActivity : Activity() {
         root.addView(stripScroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(80),
         ))
+
+        // 批量修正日期（相机没电时钟归零时，一次把本批照片日期改对）
+        val batchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(2))
+        }
+        batchButton = Button(this).apply { text = "批量改本次日期（0 张）"; textSize = 12f }
+        batchButton.isEnabled = false
+        batchButton.setOnClickListener { editAllDates() }
+        batchRow.addView(batchButton, matchWrap())
+        root.addView(batchRow, matchWrap())
 
         logView = TextView(this).apply {
             textSize = 11f
@@ -499,6 +517,7 @@ class MainActivity : Activity() {
             stripRow.removeAllViews()
             receivedImages.clear()
             currentImageInfo = null
+            updateBatchButton()
             speedIndex = -1
             speedLastBytes = 0L
             speedLastTime = 0L
@@ -569,17 +588,63 @@ class MainActivity : Activity() {
     }
 
     private fun addReceivedImage(info: ImageInfo, thumb: Bitmap) {
-        receivedImages.add(ReceivedImage(info, thumb))
+        val image = ReceivedImage(info, thumb)
+        receivedImages.add(image)
         val item = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageBitmap(thumb)
-            setOnClickListener { FullImageViewer(this@MainActivity, info).show() }
+            setOnClickListener {
+                FullImageViewer(this@MainActivity, image.info) { updated ->
+                    image.info = updated
+                    if (currentImageInfo?.uri == updated.uri) currentImageInfo = updated
+                }.show()
+            }
         }
         val params = LinearLayout.LayoutParams(dp(64), dp(64))
         params.setMargins(dp(2), 0, dp(2), 0)
         item.layoutParams = params
         stripRow.addView(item)
         stripScroll.post { stripScroll.fullScroll(View.FOCUS_RIGHT) }
+        updateBatchButton()
+    }
+
+    private fun updateBatchButton() {
+        batchButton.text = "批量改本次日期（${receivedImages.size} 张）"
+        batchButton.isEnabled = receivedImages.isNotEmpty()
+    }
+
+    /** 把本批（本次会话接收的）所有照片日期统一改掉。 */
+    private fun editAllDates() {
+        val images = receivedImages.toList()
+        if (images.isEmpty()) {
+            appendLog("还没有已接收的图片")
+            return
+        }
+        PhotoDates.showPicker(this, images.first().info.takenAt) { calendar ->
+            val editor = PhotoDateEditor(this)
+            val newTaken = PhotoDates.displayString(calendar)
+            appendLog("批量改日期 -> $newTaken（${images.size} 张）")
+            Thread {
+                var ok = 0
+                images.forEach { image ->
+                    val result = editor.updateDate(image.info.uri, calendar)
+                    if (result.ok) {
+                        ok++
+                        image.info = image.info.copy(takenAt = newTaken)
+                    } else {
+                        appendLog("改日期失败 ${image.info.name}: ${result.message}")
+                    }
+                }
+                appendLog("批量改日期完成：$ok/${images.size} 张 -> $newTaken")
+                mainHandler.post {
+                    if (currentImageInfo != null) {
+                        receivedImages.firstOrNull { it.info.uri == currentImageInfo?.uri }
+                            ?.let { currentImageInfo = it.info }
+                    }
+                    updateBatchButton()
+                }
+            }.start()
+        }
     }
 
     /** 保存时从 JPEG 读取 EXIF，构建图片详情（供侧栏显示）。 */

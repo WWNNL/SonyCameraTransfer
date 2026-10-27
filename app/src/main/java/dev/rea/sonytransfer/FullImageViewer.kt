@@ -1,5 +1,6 @@
 package dev.rea.sonytransfer
 
+import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Bitmap
@@ -24,6 +25,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import java.io.ByteArrayInputStream
 import java.util.Locale
 
@@ -71,7 +73,14 @@ data class ImageInfo(
  *  - 图片区支持双指缩放（1x~8x）、单指拖动、双击缩放；
  *  - 右侧信息侧栏显示当前图片的详细信息，可用右上角「信息」按钮收起/展开。
  */
-class FullImageViewer(private val context: Context, private val info: ImageInfo) {
+class FullImageViewer(
+    private val context: Context,
+    info: ImageInfo,
+    private val onInfoUpdated: (ImageInfo) -> Unit = {},
+) {
+
+    private var imageInfo = info
+    private var takenRow: TextView? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
@@ -158,19 +167,29 @@ class FullImageViewer(private val context: Context, private val info: ImageInfo)
             LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) },
         )
         val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        addRow(list, "文件名", info.name)
-        addRow(list, "大小", info.sizeText)
-        addRow(list, "分辨率", info.resolutionText)
-        addRow(list, "拍摄时间", info.takenText)
-        addRow(list, "相机", info.cameraText)
-        addRow(list, "曝光参数", info.exposureText)
-        addRow(list, "保存位置", info.locationText)
+        addRow(list, "文件名", imageInfo.name)
+        addRow(list, "大小", imageInfo.sizeText)
+        addRow(list, "分辨率", imageInfo.resolutionText)
+        takenRow = addRow(list, "拍摄时间", imageInfo.takenText)
+        addRow(list, "相机", imageInfo.cameraText)
+        addRow(list, "曝光参数", imageInfo.exposureText)
+        addRow(list, "保存位置", imageInfo.locationText)
         val scroll = ScrollView(context).apply { addView(list) }
         panel.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        val dateButton = Button(context).apply {
+            text = "修改日期"
+            textSize = 13f
+        }
+        dateButton.setOnClickListener { openDatePicker() }
+        panel.addView(
+            dateButton,
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
+        )
         return panel
     }
 
-    private fun addRow(parent: LinearLayout, label: String, value: String) {
+    private fun addRow(parent: LinearLayout, label: String, value: String): TextView {
         parent.addView(
             TextView(context).apply {
                 text = label
@@ -179,20 +198,38 @@ class FullImageViewer(private val context: Context, private val info: ImageInfo)
                 setPadding(0, 0, 0, dp(2))
             },
         )
-        parent.addView(
-            TextView(context).apply {
-                text = value
-                textSize = 12f
-                setTextColor(Color.WHITE)
-                setPadding(0, 0, 0, dp(12))
-            },
-        )
+        val valueView = TextView(context).apply {
+            text = value
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, dp(12))
+        }
+        parent.addView(valueView)
+        return valueView
+    }
+
+    /** 修改当前照片的拍摄日期（EXIF + 相册日期）。 */
+    private fun openDatePicker() {
+        val activity = context as? Activity ?: return
+        PhotoDates.showPicker(activity, imageInfo.takenAt) { calendar ->
+            Thread {
+                val result = PhotoDateEditor(context).updateDate(imageInfo.uri, calendar)
+                mainHandler.post {
+                    if (result.ok) {
+                        imageInfo = imageInfo.copy(takenAt = PhotoDates.displayString(calendar))
+                        takenRow?.text = imageInfo.takenText
+                        onInfoUpdated(imageInfo)
+                    }
+                    Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                }
+            }.start()
+        }
     }
 
     // ------------------------------------------------------------ 解码
 
     private fun decodeImage(maxDimension: Int): Bitmap? {
-        val uri = info.uri ?: return null
+        val uri = imageInfo.uri ?: return null
         return runCatching {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return null

@@ -15,8 +15,9 @@
    - 单张快路径：`/DigitalImagingDesc.xml` 的 `X_CurrentContent_URL`；
    - 自动保存到相册 `Pictures/SonyTransfer`。
 5. **传图进度条**：总进度条（`总进度 2/3 · 68%`）+ 当前图片进度条（`DSC04304.JPG · 45% · 4.8 MB/s`，速度按最近 ~1s 增量平滑），结束后日志给出总用时与平均速度。
-6. **传图预览**：开始传输前先取相机端 TN 缩略图显示；每张保存后再解码原图预览（自动 EXIF 旋转、按 1280px 采样防 OOM）；底部缩略图条累积所有已接收图片，点击可回看任意一张大图。
-7. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
+6. **传图预览**：开始传输前先取相机端 TN 缩略图显示；每张保存后再解码原图预览（自动 EXIF 旋转、按 1280px 采样防 OOM）；底部缩略图条累积所有已接收图片。
+7. **全屏查看 + 信息侧栏**：点击缩略图（或大图预览区）进入全屏查看器，双指缩放（1x~8x）、单指拖动、双击缩放；右侧侧栏显示当前图片详情（文件名、大小、分辨率、拍摄时间、机身、曝光参数、保存位置），右上角「信息」可收起。
+8. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
 
 ## 构建
 
@@ -58,6 +59,7 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 | `Ssdp.kt` | SSDP 发现，返回 `dd.xml` LOCATION |
 | `Upnp.kt` | HTTP GET（流式+进度回调）/ SOAP / DD 解析 / DIDL 解析 / res 选择 |
 | `SonyCameraClient.kt` | 「在本机上选择」完整接收时序（含进度与缩略图回调） |
+| `FullImageViewer.kt` | 全屏查看器 + 双指缩放 + 图片信息侧栏 |
 | `ImageSaver.kt` | MediaStore 保存（API 29+）/ 旧版公共目录 |
 
 ## 已知限制 / TODO
