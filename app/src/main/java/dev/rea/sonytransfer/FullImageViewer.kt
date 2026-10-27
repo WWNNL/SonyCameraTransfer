@@ -23,11 +23,9 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.MediaController
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.VideoView
 import java.io.ByteArrayInputStream
 import java.util.Locale
 
@@ -183,20 +181,10 @@ class FullImageViewer(
 
     private fun setupVideo(container: FrameLayout) {
         val uri = imageInfo.uri ?: return
-        val videoView = VideoView(context)
-        container.addView(videoView, FrameLayout.LayoutParams(MATCH, MATCH))
-        val controller = MediaController(context)
-        controller.setAnchorView(videoView)
-        videoView.setMediaController(controller)
-        videoView.setVideoURI(uri)
-        videoView.setOnPreparedListener {
-            it.isLooping = false
-            videoView.start()
-        }
-        videoView.setOnErrorListener { _, _, _ ->
-            Toast.makeText(context, "视频播放失败", Toast.LENGTH_SHORT).show()
-            true
-        }
+        val player = VideoPlayerView(context)
+        container.addView(player, FrameLayout.LayoutParams(MATCH, MATCH))
+        player.setVideo(uri)
+        dialog.setOnDismissListener { player.release() }
     }
 
     // ------------------------------------------------------------ 信息侧栏

@@ -23,7 +23,7 @@ data class BrowseEntry(
     val isContainer: Boolean
         get() = upnpClass.contains("container", ignoreCase = true)
 
-    /** 原始文件：视频优先 video/*（视频 res 可能带 DLNA.ORG_PN），图片优先无 PN 且体积最大的 res。 */
+    /** 原始文件：视频优先 video 类型（视频 res 可能带 DLNA.ORG_PN），图片优先无 PN 且体积最大的 res。 */
     val originalRes: ResEntry?
         get() = Upnp.selectOriginalRes(resList)
 }
@@ -52,7 +52,7 @@ object Upnp {
 
     /**
      * 从一组 res 里挑"原始文件"：
-     *  1. 有 video/* → 取最大的 video res（视频的 res 常带 DLNA.ORG_PN，不能按"无 PN"判断）；
+     *  1. 有 video 类型 → 取最大的 video res（视频的 res 常带 DLNA.ORG_PN，不能按"无 PN"判断）；
      *  2. 图片 → 优先无 DLNA.ORG_PN（真原图），多个取最大；
      *  3. 兜底 → 排除 JPEG_TN 后取最大，避免把缩略图当原图。
      */

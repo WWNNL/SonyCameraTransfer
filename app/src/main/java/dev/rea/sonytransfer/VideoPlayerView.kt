@@ -35,29 +35,12 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
     private val playButton = Button(context)
     private val seekBar = SeekBar(context)
     private val timeText = TextView(context)
-    private val bar = LinearLayout(context)
-
-    /** 点一下画面时先执行（例如收起侧栏），再切换播放/暂停。 */
-    var onBeforeTap: (() -> Unit)? = null
 
     private var pendingUri: Uri? = null
     private var prepared = false
     private var durationMs = 0
     private var userSeeking = false
-    /** 按下时控制条是否处于隐藏状态：隐藏时单击只负责唤出控制条，不误触发播放/暂停。 */
-    private var barHiddenOnDown = false
     private val density = context.resources.displayMetrics.density
-
-    /** 控制条 4 秒无操作自动隐藏，把整块画面让给缩放手势。 */
-    private val hideControls = object : Runnable {
-        override fun run() {
-            if (userSeeking) {
-                handler.postDelayed(this, 1000)
-                return
-            }
-            bar.visibility = View.GONE
-        }
-    }
 
     init {
         setBackgroundColor(0xFF000000.toInt())
@@ -66,7 +49,7 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
 
-        bar.apply {
+        val bar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(0x99000000.toInt())
@@ -77,10 +60,7 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             textSize = 16f
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0x00000000)
-            setOnClickListener {
-                togglePlay()
-                showControlsTemporarily()
-            }
+            setOnClickListener { togglePlay() }
         }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -125,21 +105,7 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             mediaPlayer.setSurface(Surface(surfaceTexture))
             pendingUri?.let { prepare(it) }
         }
-        textureView.onTap = {
-            onBeforeTap?.invoke()
-            // 控制条本来是隐藏的：这一下只把它唤出来（标准的"点画面显示控制条"），不切换播放。
-            if (barHiddenOnDown) {
-                showControlsTemporarily()
-            } else {
-                togglePlay()
-            }
-            barHiddenOnDown = false
-        }
-        // 双指按下/拖动时也让控制条复位，避免它一直占住底部一条。
-        textureView.onTouchDown = {
-            barHiddenOnDown = bar.visibility != View.VISIBLE
-            showControlsTemporarily()
-        }
+        textureView.onTap = { togglePlay() }
 
         mediaPlayer.setOnPreparedListener { mp ->
             prepared = true
@@ -149,14 +115,11 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             mp.start()
             updatePlayButton()
             updateProgressLoop()
-            showControlsTemporarily()
         }
         mediaPlayer.setOnVideoSizeChangedListener { _, width, height ->
             textureView.setVideoSize(width, height)
         }
         mediaPlayer.setOnCompletionListener {
-            // 播放结束/停止后控制条也会自动收起，之后整屏都能双指缩放。
-            showControlsTemporarily()
             updatePlayButton()
             seekBar.progress = 0
             timeText.text = "0:00 / ${formatTime(durationMs.toLong())}"
@@ -174,11 +137,6 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             mediaPlayer.setSurface(Surface(surfaceTexture))
             prepare(uri)
         }
-    }
-
-    /** 预览旋转 90°（只转显示，不改原文件）。 */
-    fun rotateView() {
-        textureView.rotate90()
     }
 
     private fun prepare(uri: Uri) {
@@ -200,17 +158,10 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         if (!prepared) return
         if (mediaPlayer.isPlaying) mediaPlayer.pause() else mediaPlayer.start()
         updatePlayButton()
-        showControlsTemporarily()
     }
 
     private fun updatePlayButton() {
         playButton.text = if (prepared && mediaPlayer.isPlaying) "⏸" else "▶"
-    }
-
-    private fun showControlsTemporarily() {
-        bar.visibility = View.VISIBLE
-        handler.removeCallbacks(hideControls)
-        handler.postDelayed(hideControls, 4000)
     }
 
     private fun updateProgressLoop() {
@@ -233,8 +184,6 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         runCatching { mediaPlayer.release() }
         textureView.onSurfaceReady = null
         textureView.onTap = null
-        textureView.onTouchDown = null
-        onBeforeTap = null
     }
 
     private fun formatTime(millis: Long): String {
@@ -251,17 +200,11 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     var onSurfaceReady: ((SurfaceTexture) -> Unit)? = null
     var onTap: (() -> Unit)? = null
 
-    /** 手指按下时回调（用于让控制条短暂出现）。 */
-    var onTouchDown: (() -> Unit)? = null
-
     private val baseMatrix = Matrix()
     private val suppMatrix = Matrix()
     private val matrixValues = FloatArray(9)
     private var videoWidth = 0
     private var videoHeight = 0
-    private var rotationDegrees = 0
-    private var lastTextureWidth = -1
-    private var lastTextureHeight = -1
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -288,7 +231,6 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
                 distanceX: Float,
                 distanceY: Float,
             ): Boolean {
-                if (scaleDetector.isInProgress) return true
                 if (currentScale() > 1.01f) {
                     suppMatrix.postTranslate(-distanceX, -distanceY)
                     applyTransform()
@@ -324,10 +266,6 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        // 只有纹理尺寸真的变化才重置基准；暂停/停止播放时若重复回调，会把用户刚做的缩放清掉。
-        if (width == lastTextureWidth && height == lastTextureHeight) return
-        lastTextureWidth = width
-        lastTextureHeight = height
         resetBase()
     }
 
@@ -341,22 +279,12 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
         post { resetBase() }
     }
 
-    /** 旋转 90°（只影响预览显示）。 */
-    fun rotate90() {
-        rotationDegrees = (rotationDegrees + 90) % 360
-        resetBase()
-    }
-
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         resetBase()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            parent?.requestDisallowInterceptTouchEvent(true)
-            onTouchDown?.invoke()
-        }
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP ||
@@ -373,64 +301,22 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     }
 
     private fun applyTransform() {
-        // display = suppMatrix × baseMatrix：supp 在“屏幕坐标”里叠加，
-        // 这样 pinch 的 focusX/focusY（屏幕坐标）才是真正的缩放中心。
-        // 暂停/停止播放时 TextureView 可能不再出帧，主动 invalidate() 让变换立刻可见。
         val display = Matrix().apply {
-            set(baseMatrix)
-            postConcat(suppMatrix)
+            set(suppMatrix)
+            postConcat(baseMatrix)
         }
         setTransform(display)
-        invalidate()
     }
 
-    /**
-     * 视频按比例居中。
-     *
-     * 注意：TextureView 的默认变换是「把视频拉伸铺满整个视图」，所以不能直接套等比缩放；
-     * 要用非等比缩放（scaleX/scaleY）把默认拉伸还原，再平移到居中位置。
-     */
+    /** 视频按比例居中：scale = min(视图宽/视频宽, 视图高/视频高)，再加偏移居中。 */
     private fun resetBase() {
         if (videoWidth <= 0 || videoHeight <= 0 || width == 0 || height == 0) return
-        val viewWidth = width.toFloat()
-        val viewHeight = height.toFloat()
-        // 旋转 90/270 时宽高互换，按旋转后的有效尺寸做适配
-        val rotated = rotationDegrees % 180 != 0
-        val effectiveWidth = if (rotated) videoHeight else videoWidth
-        val effectiveHeight = if (rotated) videoWidth else videoHeight
-        val fitScale = minOf(viewWidth / effectiveWidth, viewHeight / effectiveHeight)
-        // 撤销 TextureView 默认拉伸：缩放后内容尺寸 = fitScale * 视频尺寸
-        val scaleX = fitScale * videoWidth / viewWidth
-        val scaleY = fitScale * videoHeight / viewHeight
-        // postRotate 绕原点旋转，旋转后的矩形中心不在原点，需要按旋转后的中心重新居中
-        val scaledWidth = fitScale * videoWidth
-        val scaledHeight = fitScale * videoHeight
-        val rotatedCenterX: Float
-        val rotatedCenterY: Float
-        when (rotationDegrees) {
-            90 -> {
-                rotatedCenterX = -scaledHeight / 2f
-                rotatedCenterY = scaledWidth / 2f
-            }
-            180 -> {
-                rotatedCenterX = -scaledWidth / 2f
-                rotatedCenterY = -scaledHeight / 2f
-            }
-            270 -> {
-                rotatedCenterX = scaledHeight / 2f
-                rotatedCenterY = -scaledWidth / 2f
-            }
-            else -> {
-                rotatedCenterX = scaledWidth / 2f
-                rotatedCenterY = scaledHeight / 2f
-            }
-        }
-        val translateX = viewWidth / 2f - rotatedCenterX
-        val translateY = viewHeight / 2f - rotatedCenterY
+        val scale = minOf(width.toFloat() / videoWidth, height.toFloat() / videoHeight)
+        val dx = (width - videoWidth * scale) / 2f
+        val dy = (height - videoHeight * scale) / 2f
         baseMatrix.reset()
-        baseMatrix.postScale(scaleX, scaleY)
-        baseMatrix.postRotate(rotationDegrees.toFloat())
-        baseMatrix.postTranslate(translateX, translateY)
+        baseMatrix.postScale(scale, scale)
+        baseMatrix.postTranslate(dx, dy)
         suppMatrix.reset()
         applyTransform()
     }
@@ -438,11 +324,10 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     private fun clampTransform() {
         if (videoWidth <= 0 || videoHeight <= 0 || width == 0 || height == 0) return
         val display = Matrix().apply {
-            set(baseMatrix)
-            postConcat(suppMatrix)
+            set(suppMatrix)
+            postConcat(baseMatrix)
         }
-        // 视频在视图里实际占用的矩形：默认铺满的视图矩形经过 base 变换后的范围
-        val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        val rect = RectF(0f, 0f, videoWidth.toFloat(), videoHeight.toFloat())
         display.mapRect(rect)
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()
