@@ -80,6 +80,32 @@ class UpnpDidlParserTest {
     }
 
     @Test
+    fun videoItemPrefersVideoResOverThumbnail() {
+        // 相机推送视频时：缩略图 res 不带 PN、视频 res 带 PN，且缩略图可能排在前面
+        val didl = """<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="VID_1" parentID="PushRoot"><dc:title>C0001.MP4</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="http-get:*:image/jpeg:*" size="60000">http://192.168.122.1:60151/TN_C0001.MP4</res><res protocolInfo="http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_HP_HD_AAC" size="120000000">http://192.168.122.1:60151/ORG_C0001.MP4</res></item></DIDL-Lite>"""
+
+        val entry = Upnp.parseDidl(didl).first()
+
+        assertEquals(
+            "http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_HP_HD_AAC",
+            entry.originalRes?.protocolInfo,
+        )
+        assertEquals(120000000L, entry.originalRes?.sizeHint)
+        assertEquals("video/mp4", Upnp.mimeOf(entry.originalRes!!.protocolInfo))
+    }
+
+    @Test
+    fun imagePrefersLargestOriginalResWithoutPn() {
+        // 缩略图 res 也不带 PN 时，不能按顺序取第一个，要取体积最大的原图
+        val didl = """<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="IMG_1"><dc:title>DSC04309.JPG</dc:title><upnp:class>object.item.imageItem.photo</upnp:class><res protocolInfo="http-get:*:image/jpeg:*" size="60000">http://192.168.122.1:60151/TN_DSC04309.JPG</res><res protocolInfo="http-get:*:image/jpeg:*" size="11829248">http://192.168.122.1:60151/ORG_DSC04309.JPG</res></item></DIDL-Lite>"""
+
+        val entry = Upnp.parseDidl(didl).first()
+
+        assertEquals(11829248L, entry.originalRes?.sizeHint)
+        assertTrue(entry.originalRes!!.url.contains("ORG_DSC04309.JPG"))
+    }
+
+    @Test
     fun emptyDidlReturnsEmptyList() {
         assertTrue(Upnp.parseDidl("").isEmpty())
         assertNull(Upnp.parseDidl("<DIDL-Lite/>").firstOrNull())

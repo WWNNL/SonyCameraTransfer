@@ -89,6 +89,10 @@ class SonyCameraClient(private val log: (String) -> Unit) {
                     return@forEachIndexed
                 }
                 val sizeHint = res.sizeHint ?: 0L
+                log(
+                    "  ${item.title}: ${item.resList.size} 个 res → " +
+                        "${Upnp.mimeOf(res.protocolInfo)}, ${sizeHint / 1024} KB",
+                )
                 onProgress(Progress(index, items.size, item.title, 0, sizeHint))
 
                 // 先取 TN 缩略图做预览（小、快；失败不影响传输）
@@ -118,10 +122,7 @@ class SonyCameraClient(private val log: (String) -> Unit) {
         }
     }
 
-    private fun mimeOf(res: ResEntry): String {
-        val mime = res.protocolInfo.split(':').getOrNull(2)?.trim()
-        return if (mime.isNullOrEmpty()) "image/jpeg" else mime
-    }
+    private fun mimeOf(res: ResEntry): String = Upnp.mimeOf(res.protocolInfo)
 
     private fun itemsFromDigitalImaging(baseUrl: String): List<CameraItem> {
         val xml = String(Upnp.httpGetBytes("$baseUrl/DigitalImagingDesc.xml"), Charsets.UTF_8)

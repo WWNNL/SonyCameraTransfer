@@ -18,10 +18,11 @@
 6. **传图预览**：开始传输前先取相机端 TN 缩略图显示；每张保存后再解码原图预览（自动 EXIF 旋转、按 1280px 采样防 OOM）；底部缩略图条累积所有已接收图片。
 7. **全屏查看 + 信息侧栏**：点击缩略图（或大图预览区）进入全屏查看器，双指缩放（1x~8x）、单指拖动、双击缩放；右侧侧栏显示当前图片详情（文件名、大小、分辨率、拍摄时间、机身、曝光参数、保存位置），右上角「信息」可收起。
 8. **照片日期修正**（应对相机没电后时钟归零、照片变成 2016 年）：
-   - 单张：全屏查看器侧栏「修改日期」→ 选日期 + 时间；
-   - 整批：主界面「批量改本次日期」一次改掉本次接收的所有照片；
-   - 同时改写 EXIF（DateTime / DateTimeOriginal / DateTimeDigitized）和 MediaStore `DATE_TAKEN`，相册日期排序/显示同步更新。
-9. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
+   - 单张：全屏查看器侧栏「修改日期」→ 选目标日期（可用于个别拍歪时间）；
+   - 整批：主界面「按偏移量改日期」→ 输入 年/月/日/时/分 偏移（如全部 +10 年），每张按各自原时间平移，**彼此相对时间差保持不变**；
+   - 图片同时改写 EXIF（DateTime / DateTimeOriginal / DateTimeDigitized）和 MediaStore `DATE_TAKEN`；视频只改相册日期；相册排序/显示同步更新。
+9. **视频接收/预览**：相机端发送视频时按 `video/mp4` 保存到 `Movies/SonyTransfer`；缩略图条用视频首帧，点击全屏可直接播放（系统播放控制条）。
+10. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
 
 ## 构建
 
@@ -51,7 +52,8 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 2. 手机：打开 App → 贴相机 NFC（或手动填 SSID/密码）→ App 自动连 Wi-Fi、发现、接收、保存。
 3. 传输时 App 显示总进度 / 当前图片进度 / 实时速度，并预览当前照片；底部缩略图条累积所有已接收图片，点击可看大图。
 4. 照片保存到相册 `Pictures/SonyTransfer`；传完相机会自动退出图传并关闭热点（`X_TransferEnd` 后），属正常。
-5. 如果照片日期不对（相机没电后时钟归零会变成 2016）：点缩略图进全屏 → 侧栏「修改日期」单张修正；或主界面「批量改本次日期」一次修正整批。
+5. 如果照片日期不对（相机没电后时钟归零会变成 2016）：点缩略图进全屏 → 侧栏「修改日期」单张修正；或主界面「按偏移量改日期」整批平移（保留相对时间差）。
+6. 相机端选了视频会一起接收：存到 `Movies/SonyTransfer`，缩略图显示首帧，点击全屏播放。
 
 ## 代码结构
 
@@ -63,10 +65,10 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 | `CameraWifi.kt` | `WifiNetworkSpecifier` 连接 + `bindProcessToNetwork` |
 | `Ssdp.kt` | SSDP 发现，返回 `dd.xml` LOCATION |
 | `Upnp.kt` | HTTP GET（流式+进度回调）/ SOAP / DD 解析 / DIDL 解析 / res 选择 |
-| `SonyCameraClient.kt` | 「在本机上选择」完整接收时序（含进度与缩略图回调） |
-| `FullImageViewer.kt` | 全屏查看器 + 双指缩放 + 图片信息侧栏 |
-| `PhotoDateEditor.kt` | 修改照片日期（EXIF + MediaStore）、日期选择/格式化工具 |
-| `ImageSaver.kt` | MediaStore 保存（API 29+）/ 旧版公共目录 |
+| `SonyCameraClient.kt` | 「在本机上选择」完整接收时序（含进度、缩略图、图片/视频类型回调） |
+| `FullImageViewer.kt` | 全屏查看器（图片双指缩放 / 视频播放）+ 半透明信息侧栏 |
+| `PhotoDateEditor.kt` | 修改日期（EXIF + MediaStore）、日期选择/偏移工具 |
+| `ImageSaver.kt` | 保存（图片 Pictures、视频 Movies；API 29+ MediaStore / 旧版公共目录） |
 
 ## 已知限制 / TODO
 

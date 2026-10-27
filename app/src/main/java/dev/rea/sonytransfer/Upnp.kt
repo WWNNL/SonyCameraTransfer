@@ -23,10 +23,9 @@ data class BrowseEntry(
     val isContainer: Boolean
         get() = upnpClass.contains("container", ignoreCase = true)
 
-    /** 原图 = protocolInfo 里没有 DLNA.ORG_PN 的那个 res（官方 App 的 PN_ORIGINAL）。 */
+    /** 原始文件：视频优先 video/*（视频 res 可能带 DLNA.ORG_PN），图片优先无 PN 且体积最大的 res。 */
     val originalRes: ResEntry?
-        get() = resList.firstOrNull { !it.protocolInfo.contains("DLNA.ORG_PN") }
-            ?: resList.lastOrNull()
+        get() = Upnp.selectOriginalRes(resList)
 }
 
 data class BrowsePage(val entries: List<BrowseEntry>, val totalMatches: Int)
@@ -38,13 +37,40 @@ data class CameraItem(
     val resList: List<ResEntry>,
 ) {
     val originalRes: ResEntry?
-        get() = resList.firstOrNull { !it.protocolInfo.contains("DLNA.ORG_PN") }
-            ?: resList.lastOrNull()
+        get() = Upnp.selectOriginalRes(resList)
 }
 
 object Upnp {
     const val CDS = "urn:schemas-upnp-org:service:ContentDirectory:1"
     const val XPS = "urn:schemas-sony-com:service:XPushList:1"
+
+    /** protocolInfo 第 3 段是 mime，例如 "http-get:*:video/mp4:DLNA.ORG_PN=..." → "video/mp4"。 */
+    fun mimeOf(protocolInfo: String): String {
+        val mime = protocolInfo.split(':').getOrNull(2)?.trim()
+        return if (mime.isNullOrEmpty()) "image/jpeg" else mime
+    }
+
+    /**
+     * 从一组 res 里挑"原始文件"：
+     *  1. 有 video/* → 取最大的 video res（视频的 res 常带 DLNA.ORG_PN，不能按"无 PN"判断）；
+     *  2. 图片 → 优先无 DLNA.ORG_PN（真原图），多个取最大；
+     *  3. 兜底 → 排除 JPEG_TN 后取最大，避免把缩略图当原图。
+     */
+    fun selectOriginalRes(resList: List<ResEntry>): ResEntry? {
+        if (resList.isEmpty()) return null
+        val videos = resList.filter { mimeOf(it.protocolInfo).startsWith("video/") }
+        if (videos.isNotEmpty()) {
+            return videos.maxByOrNull { it.sizeHint ?: 0L } ?: videos.first()
+        }
+        val images = resList.filter { mimeOf(it.protocolInfo).startsWith("image/") }
+        val pool = images.ifEmpty { resList }
+        val originals = pool.filterNot { it.protocolInfo.contains("DLNA.ORG_PN") }
+        if (originals.isNotEmpty()) {
+            return originals.maxByOrNull { it.sizeHint ?: 0L } ?: originals.first()
+        }
+        val nonThumbnails = pool.filterNot { it.protocolInfo.contains("JPEG_TN") }
+        return (nonThumbnails.ifEmpty { pool }).maxByOrNull { it.sizeHint ?: 0L }
+    }
 
     /**
      * 流式 GET，可选进度回调（downloadedBytes, totalBytes；total 未知时为 0）。
