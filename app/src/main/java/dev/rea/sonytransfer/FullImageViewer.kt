@@ -1,6 +1,5 @@
 package dev.rea.sonytransfer
 
-import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Bitmap
@@ -25,11 +24,10 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import java.io.ByteArrayInputStream
 import java.util.Locale
 
-/** 一张已接收文件（图片或视频）的详细信息。 */
+/** 一张已接收图片的详细信息（保存时从 JPEG 的 EXIF 读取）。 */
 data class ImageInfo(
     val name: String,
     val uri: Uri?,
@@ -42,32 +40,18 @@ data class ImageInfo(
     val aperture: String?,
     val iso: String?,
     val focalLength: String?,
-    val isVideo: Boolean = false,
-    val durationMs: Long = 0L,
-    val mime: String = "image/jpeg",
 ) {
     val sizeText: String
         get() = String.format(Locale.US, "%.1f MB（%d 字节）", bytes / 1048576.0, bytes)
 
     val resolutionText: String
         get() = if (width > 0 && height > 0) {
-            if (isVideo) {
-                String.format(Locale.US, "%d × %d", width, height)
-            } else {
-                String.format(
-                    Locale.US, "%d × %d（%.1f MP）",
-                    width, height, width.toDouble() * height / 1_000_000.0,
-                )
-            }
+            String.format(
+                Locale.US, "%d × %d（%.1f MP）",
+                width, height, width.toDouble() * height / 1_000_000.0,
+            )
         } else {
             "—"
-        }
-
-    val durationText: String
-        get() {
-            if (durationMs <= 0) return "—"
-            val totalSeconds = durationMs / 1000
-            return String.format(Locale.US, "%d:%02d", totalSeconds / 60, totalSeconds % 60)
         }
 
     val takenText: String get() = takenAt ?: "—"
@@ -79,28 +63,15 @@ data class ImageInfo(
             .joinToString(" · ")
             .ifEmpty { "—" }
 
-    val locationText: String
-        get() = if (isVideo) "Movies/SonyTransfer" else "Pictures/SonyTransfer"
+    val locationText: String get() = "Pictures/SonyTransfer"
 }
 
 /**
- * 全屏查看器：
- *  - 图片：双指缩放（1x~8x）、单指拖动、双击缩放；
- *  - 视频：VideoView + 系统播放控制条；
- *  - 右侧信息侧栏为半透明浮层（覆盖在图片上，不挤压图片），可收起/展开。
+ * 全屏图片查看器：
+ *  - 图片区支持双指缩放（1x~8x）、单指拖动、双击缩放；
+ *  - 右侧信息侧栏显示当前图片的详细信息，可用右上角「信息」按钮收起/展开。
  */
-class FullImageViewer(
-    private val context: Context,
-    info: ImageInfo,
-    private val onInfoUpdated: (ImageInfo) -> Unit = {},
-) {
-
-    private var imageInfo = info
-    private var takenRow: TextView? = null
-    private var zoomView: ZoomImageView? = null
-    private var videoPlayer: VideoPlayerView? = null
-    private var originalBitmap: Bitmap? = null
-    private var rotationDegrees = 0
+class FullImageViewer(private val context: Context, private val info: ImageInfo) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
@@ -108,32 +79,23 @@ class FullImageViewer(
 
     fun show() {
         val root = FrameLayout(context).apply { setBackgroundColor(Color.BLACK) }
+        val content = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         val imageContainer = FrameLayout(context).apply { setBackgroundColor(Color.BLACK) }
 
-        var zoomView: ZoomImageView? = null
-        var loading: TextView? = null
-        if (imageInfo.isVideo) {
-            setupVideo(imageContainer)
-        } else {
-            zoomView = ZoomImageView(context)
-            this.zoomView = zoomView
-            imageContainer.addView(zoomView, FrameLayout.LayoutParams(MATCH, MATCH))
-            loading = TextView(context).apply {
-                text = "加载中…"
-                textSize = 13f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-            }
-            imageContainer.addView(loading, FrameLayout.LayoutParams(MATCH, MATCH))
+        val zoomView = ZoomImageView(context)
+        imageContainer.addView(zoomView, FrameLayout.LayoutParams(MATCH, MATCH))
+        val loading = TextView(context).apply {
+            text = "加载中…"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
         }
-        root.addView(imageContainer, FrameLayout.LayoutParams(MATCH, MATCH))
+        imageContainer.addView(loading, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        // 信息侧栏：半透明浮层，覆盖在图片右侧（不挤压图片）
         val sidebar = buildSidebar()
-        root.addView(
-            sidebar,
-            FrameLayout.LayoutParams(dp(190), MATCH).apply { gravity = Gravity.END },
-        )
+        content.addView(imageContainer, LinearLayout.LayoutParams(0, MATCH, 1f))
+        content.addView(sidebar, LinearLayout.LayoutParams(dp(190), MATCH))
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
 
         val closeButton = Button(context).apply {
             text = "✕"
@@ -146,18 +108,6 @@ class FullImageViewer(
             FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.START)
                 .apply { setMargins(dp(10), dp(10), 0, 0) },
         )
-        val rotateButton = Button(context).apply {
-            text = "旋转"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#80000000"))
-        }
-        root.addView(
-            rotateButton,
-            FrameLayout.LayoutParams(dp(58), dp(44), Gravity.TOP or Gravity.END)
-                .apply { setMargins(0, dp(10), dp(74), 0) },
-        )
-        rotateButton.setOnClickListener { rotateView() }
         val toggleButton = Button(context).apply {
             text = "信息"
             textSize = 12f
@@ -172,69 +122,22 @@ class FullImageViewer(
         toggleButton.setOnClickListener {
             sidebar.visibility = if (sidebar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
-        // 侧栏默认收起：否则右侧 190dp 区域会被浮层挡住，看起来像「有些位置不能缩放」。
-        sidebar.visibility = View.GONE
-        // 点一下画面就收起侧栏，让整屏恢复可缩放。
-        zoomView?.onSingleTap = {
-            if (sidebar.visibility == View.VISIBLE) sidebar.visibility = View.GONE
-        }
-        videoPlayer?.onBeforeTap = {
-            if (sidebar.visibility == View.VISIBLE) sidebar.visibility = View.GONE
-        }
         closeButton.setOnClickListener { dialog.dismiss() }
 
         dialog.setContentView(root)
         dialog.show()
 
-        val view = zoomView
-        val hint = loading
-        if (view != null) {
-            Thread {
-                val bitmap = decodeImage(2048)
-                mainHandler.post {
-                    if (bitmap != null) {
-                        originalBitmap = bitmap
-                        view.setImage(bitmap)
-                        hint?.visibility = View.GONE
-                    } else {
-                        hint?.text = "图片加载失败"
-                    }
+        Thread {
+            val bitmap = decodeImage(2048)
+            mainHandler.post {
+                if (bitmap != null) {
+                    zoomView.setImage(bitmap)
+                    loading.visibility = View.GONE
+                } else {
+                    loading.text = "图片加载失败"
                 }
-            }.start()
-        }
-    }
-
-    // ------------------------------------------------------------ 旋转
-
-    /** 预览旋转 90°：图片直接旋转位图，视频旋转显示变换（不改变原文件）。 */
-    private fun rotateView() {
-        if (imageInfo.isVideo) {
-            videoPlayer?.rotateView()
-            return
-        }
-        val view = zoomView ?: return
-        val original = originalBitmap ?: return
-        rotationDegrees = (rotationDegrees + 90) % 360
-        val rotated = if (rotationDegrees == 0) {
-            original
-        } else {
-            Bitmap.createBitmap(
-                original, 0, 0, original.width, original.height,
-                Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true,
-            )
-        }
-        view.setImage(rotated)
-    }
-
-    // ------------------------------------------------------------ 视频播放
-
-    private fun setupVideo(container: FrameLayout) {
-        val uri = imageInfo.uri ?: return
-        val player = VideoPlayerView(context)
-        videoPlayer = player
-        container.addView(player, FrameLayout.LayoutParams(MATCH, MATCH))
-        player.setVideo(uri)
-        dialog.setOnDismissListener { player.release() }
+            }
+        }.start()
     }
 
     // ------------------------------------------------------------ 信息侧栏
@@ -242,13 +145,12 @@ class FullImageViewer(
     private fun buildSidebar(): LinearLayout {
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            // 半透明覆盖层（80% 不透明）
-            setBackgroundColor(Color.parseColor("#CC1E1E1E"))
-            setPadding(dp(14), dp(58), dp(14), dp(14))
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(dp(14), dp(22), dp(14), dp(14))
         }
         panel.addView(
             TextView(context).apply {
-                text = if (imageInfo.isVideo) "视频信息" else "图片信息"
+                text = "图片信息"
                 textSize = 15f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -256,34 +158,19 @@ class FullImageViewer(
             LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) },
         )
         val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        addRow(list, "文件名", imageInfo.name)
-        addRow(list, "大小", imageInfo.sizeText)
-        addRow(list, "分辨率", imageInfo.resolutionText)
-        if (imageInfo.isVideo) {
-            addRow(list, "时长", imageInfo.durationText)
-        }
-        takenRow = addRow(list, "拍摄时间", imageInfo.takenText)
-        addRow(list, "相机", imageInfo.cameraText)
-        if (!imageInfo.isVideo) {
-            addRow(list, "曝光参数", imageInfo.exposureText)
-        }
-        addRow(list, "保存位置", imageInfo.locationText)
+        addRow(list, "文件名", info.name)
+        addRow(list, "大小", info.sizeText)
+        addRow(list, "分辨率", info.resolutionText)
+        addRow(list, "拍摄时间", info.takenText)
+        addRow(list, "相机", info.cameraText)
+        addRow(list, "曝光参数", info.exposureText)
+        addRow(list, "保存位置", info.locationText)
         val scroll = ScrollView(context).apply { addView(list) }
         panel.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
-
-        val dateButton = Button(context).apply {
-            text = "修改日期"
-            textSize = 13f
-        }
-        dateButton.setOnClickListener { openDatePicker() }
-        panel.addView(
-            dateButton,
-            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) },
-        )
         return panel
     }
 
-    private fun addRow(parent: LinearLayout, label: String, value: String): TextView {
+    private fun addRow(parent: LinearLayout, label: String, value: String) {
         parent.addView(
             TextView(context).apply {
                 text = label
@@ -292,39 +179,20 @@ class FullImageViewer(
                 setPadding(0, 0, 0, dp(2))
             },
         )
-        val valueView = TextView(context).apply {
-            text = value
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, dp(12))
-        }
-        parent.addView(valueView)
-        return valueView
-    }
-
-    /** 修改当前文件的拍摄日期（图片改 EXIF + 相册；视频仅改相册日期）。 */
-    private fun openDatePicker() {
-        val activity = context as? Activity ?: return
-        PhotoDates.showPicker(activity, imageInfo.takenAt) { calendar ->
-            Thread {
-                val result = PhotoDateEditor(context)
-                    .updateDate(imageInfo.uri, calendar, imageInfo.isVideo)
-                mainHandler.post {
-                    if (result.ok) {
-                        imageInfo = imageInfo.copy(takenAt = PhotoDates.displayString(calendar))
-                        takenRow?.text = imageInfo.takenText
-                        onInfoUpdated(imageInfo)
-                    }
-                    Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
-                }
-            }.start()
-        }
+        parent.addView(
+            TextView(context).apply {
+                text = value
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setPadding(0, 0, 0, dp(12))
+            },
+        )
     }
 
     // ------------------------------------------------------------ 解码
 
     private fun decodeImage(maxDimension: Int): Bitmap? {
-        val uri = imageInfo.uri ?: return null
+        val uri = info.uri ?: return null
         return runCatching {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return null
@@ -373,9 +241,6 @@ class ZoomImageView(context: Context) : ImageView(context) {
     private val suppMatrix = Matrix()
     private val matrixValues = FloatArray(9)
 
-    /** 单击（非双击/非拖动/非缩放）回调：用来点一下画面收起侧栏。 */
-    var onSingleTap: (() -> Unit)? = null
-
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -402,19 +267,12 @@ class ZoomImageView(context: Context) : ImageView(context) {
                 distanceX: Float,
                 distanceY: Float,
             ): Boolean {
-                // 双指缩放过程中不要同时拖动，否则拖拽量会带偏缩放中心。
-                if (scaleDetector.isInProgress) return true
                 if (currentScale() > 1.01f) {
                     suppMatrix.postTranslate(-distanceX, -distanceY)
                     applyMatrix()
                     return true
                 }
                 return false
-            }
-
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                onSingleTap?.invoke()
-                return true
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -445,9 +303,6 @@ class ZoomImageView(context: Context) : ImageView(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            parent?.requestDisallowInterceptTouchEvent(true)
-        }
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP ||
@@ -464,12 +319,9 @@ class ZoomImageView(context: Context) : ImageView(context) {
     }
 
     private fun applyMatrix() {
-        // display = suppMatrix × baseMatrix：supp 在“屏幕坐标”里叠加。
-        // 这样 pinch 的 focusX/focusY（屏幕坐标）才是真正的缩放中心，
-        // 拖动位移方向/速度也才对，旋转 90° 之后同样成立。
         val display = Matrix().apply {
-            set(baseMatrix)
-            postConcat(suppMatrix)
+            set(suppMatrix)
+            postConcat(baseMatrix)
         }
         imageMatrix = display
     }
@@ -496,8 +348,8 @@ class ZoomImageView(context: Context) : ImageView(context) {
         val drawable = drawable ?: return
         if (width <= 0 || height <= 0) return
         val display = Matrix().apply {
-            set(baseMatrix)
-            postConcat(suppMatrix)
+            set(suppMatrix)
+            postConcat(baseMatrix)
         }
         val rect = RectF(
             0f, 0f,

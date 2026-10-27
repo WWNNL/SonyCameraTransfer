@@ -14,8 +14,8 @@
    - `X_TransferStart` → `X_GetPushRoot` → `ContentDirectory#Browse("PushRoot")` → 逐张 `X_TransferProgress` + GET 原图 → `X_TransferEnd`；
    - 单张快路径：`/DigitalImagingDesc.xml` 的 `X_CurrentContent_URL`；
    - 自动保存到相册 `Pictures/SonyTransfer`。
-5. **传图进度条**：总进度 + 当前文件字节进度（`已下载/总大小`，大小来自 res 的 `size` 属性）。
-6. **传图预览**：开始传输前先取相机端 TN 缩略图显示；每张保存后再解码原图预览（自动 EXIF 旋转、按 1280px 采样防 OOM）。
+5. **传图进度条**：总进度条（`总进度 2/3 · 68%`）+ 当前图片进度条（`DSC04304.JPG · 45% · 4.8 MB/s`，速度按最近 ~1s 增量平滑），结束后日志给出总用时与平均速度。
+6. **传图预览**：开始传输前先取相机端 TN 缩略图显示；每张保存后再解码原图预览（自动 EXIF 旋转、按 1280px 采样防 OOM）；底部缩略图条累积所有已接收图片，点击可回看任意一张大图。
 7. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
 
 ## 构建
@@ -44,8 +44,8 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 
 1. 相机：「发送到智能手机 → 在本机上选择」→ 选好照片 → 屏幕出现 SSID/密码 +「正在连接…」。
 2. 手机：打开 App → 贴相机 NFC（或手动填 SSID/密码）→ App 自动连 Wi-Fi、发现、接收、保存。
-3. 传输时 App 显示进度条 + 当前照片预览；照片保存到相册 `Pictures/SonyTransfer`。
-4. 传完相机会自动退出图传并关闭热点（`X_TransferEnd` 后），属正常。
+3. 传输时 App 显示总进度 / 当前图片进度 / 实时速度，并预览当前照片；底部缩略图条累积所有已接收图片，点击可看大图。
+4. 照片保存到相册 `Pictures/SonyTransfer`；传完相机会自动退出图传并关闭热点（`X_TransferEnd` 后），属正常。
 
 ## 代码结构
 

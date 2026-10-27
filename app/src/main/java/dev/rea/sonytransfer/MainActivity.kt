@@ -41,7 +41,7 @@ import java.util.Locale
 
 class MainActivity : Activity() {
 
-    private data class ReceivedImage(val name: String, val uri: Uri?, val thumb: Bitmap)
+    private data class ReceivedImage(val info: ImageInfo, val thumb: Bitmap)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density by lazy { resources.displayMetrics.density }
@@ -76,6 +76,7 @@ class MainActivity : Activity() {
     private var speedBps = 0.0
     private var receiveStartedAt = 0L
     private var receivedBytes = 0L
+    private var currentImageInfo: ImageInfo? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,7 +126,12 @@ class MainActivity : Activity() {
         val previewFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#1A1A1A"))
         }
-        previewImage = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        previewImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setOnClickListener {
+                currentImageInfo?.let { FullImageViewer(this@MainActivity, it).show() }
+            }
+        }
         previewFrame.addView(previewImage, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
         ))
@@ -444,12 +450,14 @@ class MainActivity : Activity() {
                         )
                         val big = decodePreview(data)
                         val thumb = decodePreview(data, 320)
+                        val info = buildImageInfo(name, uri, data)
                         mainHandler.post {
+                            currentImageInfo = info
                             if (big != null) {
                                 previewImage.setImageBitmap(big)
                                 previewHint.visibility = View.GONE
                             }
-                            if (thumb != null) addReceivedImage(name, uri, thumb)
+                            if (thumb != null) addReceivedImage(info, thumb)
                         }
                     } else {
                         appendLog("保存失败: $name")
@@ -472,7 +480,7 @@ class MainActivity : Activity() {
                 overallText.text = result.message
                 if (receivedImages.isNotEmpty()) {
                     previewHint.visibility = View.VISIBLE
-                    previewHint.text = "共 ${receivedImages.size} 张（点下方缩略图查看大图）"
+                    previewHint.text = "共 ${receivedImages.size} 张（点缩略图全屏查看，可双指放大）"
                 }
                 statusView.text = result.message
             }
@@ -490,6 +498,7 @@ class MainActivity : Activity() {
             previewHint.text = "预览区"
             stripRow.removeAllViews()
             receivedImages.clear()
+            currentImageInfo = null
             speedIndex = -1
             speedLastBytes = 0L
             speedLastTime = 0L
@@ -559,12 +568,12 @@ class MainActivity : Activity() {
         previewHint.text = "${progress.title}（第 ${progress.index + 1}/${progress.total} 张）"
     }
 
-    private fun addReceivedImage(name: String, uri: Uri?, thumb: Bitmap) {
-        receivedImages.add(ReceivedImage(name, uri, thumb))
+    private fun addReceivedImage(info: ImageInfo, thumb: Bitmap) {
+        receivedImages.add(ReceivedImage(info, thumb))
         val item = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageBitmap(thumb)
-            setOnClickListener { showFullImage(uri, name) }
+            setOnClickListener { FullImageViewer(this@MainActivity, info).show() }
         }
         val params = LinearLayout.LayoutParams(dp(64), dp(64))
         params.setMargins(dp(2), 0, dp(2), 0)
@@ -573,22 +582,72 @@ class MainActivity : Activity() {
         stripScroll.post { stripScroll.fullScroll(View.FOCUS_RIGHT) }
     }
 
-    private fun showFullImage(uri: Uri?, name: String) {
-        if (uri == null) return
-        Thread {
-            val bitmap = runCatching {
-                contentResolver.openInputStream(uri)?.use {
-                    decodePreview(it.readBytes(), 1600)
-                }
-            }.getOrNull()
-            if (bitmap != null) {
-                mainHandler.post {
-                    previewImage.setImageBitmap(bitmap)
-                    previewHint.visibility = View.GONE
-                    statusView.text = "预览：$name（点击其他缩略图切换）"
-                }
-            }
-        }.start()
+    /** 保存时从 JPEG 读取 EXIF，构建图片详情（供侧栏显示）。 */
+    private fun buildImageInfo(name: String, uri: Uri?, data: ByteArray): ImageInfo {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+        val exif = runCatching { ExifInterface(ByteArrayInputStream(data)) }.getOrNull()
+        fun attr(tag: String): String? =
+            exif?.getAttribute(tag)?.trim()?.takeIf { it.isNotEmpty() }
+
+        val make = attr(ExifInterface.TAG_MAKE).orEmpty()
+        val model = attr(ExifInterface.TAG_MODEL).orEmpty()
+        val camera = when {
+            make.isNotEmpty() && model.isNotEmpty() && !model.startsWith(make, true) -> "$make $model"
+            model.isNotEmpty() -> model
+            make.isNotEmpty() -> make
+            else -> null
+        }
+        return ImageInfo(
+            name = name,
+            uri = uri,
+            bytes = data.size.toLong(),
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            takenAt = formatExifDateTime(
+                attr(ExifInterface.TAG_DATETIME_ORIGINAL) ?: attr(ExifInterface.TAG_DATETIME),
+            ),
+            camera = camera,
+            exposure = formatExposure(attr(ExifInterface.TAG_EXPOSURE_TIME)),
+            aperture = attr(ExifInterface.TAG_F_NUMBER)?.let { "f/$it" },
+            iso = attr(ExifInterface.TAG_ISO_SPEED_RATINGS)?.let { "ISO $it" }
+                ?: attr("PhotographicSensitivity")?.let { "ISO $it" },
+            focalLength = formatFocalLength(attr(ExifInterface.TAG_FOCAL_LENGTH)),
+        )
+    }
+
+    /** "2016:03:26 10:31:00" → "2016-03-26 10:31:00" */
+    private fun formatExifDateTime(value: String?): String? {
+        val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return raw.replaceFirst(":", "-").replaceFirst(":", "-")
+    }
+
+    /** 曝光时间：优先保持 "1/250" 形式，小数秒换算成 1/x。 */
+    private fun formatExposure(value: String?): String? {
+        val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (raw.contains('/')) return "$raw s"
+        val seconds = raw.toDoubleOrNull() ?: return "$raw s"
+        if (seconds <= 0.0) return "$raw s"
+        return if (seconds >= 1.0) {
+            String.format(Locale.US, "%.1f s", seconds)
+        } else {
+            String.format(Locale.US, "1/%d s", Math.round(1.0 / seconds))
+        }
+    }
+
+    /** 焦距："350/10" → "35mm" */
+    private fun formatFocalLength(value: String?): String? {
+        val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val millimeters = if (raw.contains('/')) {
+            val parts = raw.split('/')
+            val numerator = parts.getOrNull(0)?.toDoubleOrNull() ?: return null
+            val denominator = parts.getOrNull(1)?.toDoubleOrNull()?.takeIf { it != 0.0 }
+                ?: return null
+            numerator / denominator
+        } else {
+            raw.toDoubleOrNull() ?: return null
+        }
+        return String.format(Locale.US, "%.0fmm", millimeters)
     }
 
     /** 解码 JPEG 预览：先算采样率（避免 24MP 原图 OOM），再按 EXIF 旋转。 */
