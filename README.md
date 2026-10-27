@@ -58,8 +58,16 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 
 ## 已知限制 / TODO
 
-- NFC 规格来自官方 App 反编译，**尚未在真机 NFC 上验证**（SSID/密码/DD-URL 字段解析待实测）。
+- NFC 实机已能读到 SSID/密码（2026-10-28 真机一次跑通全链路）；IP/DD-URL 字段暂未解析出来
+  （可能是 a6300 标签未写，或 TLV 偏移问题——v0.2.0 起日志会打印原始 NDEF hex 便于定位）。
 - 目前只做「在本机上选择」推送接收；「在智能手机上选择」的目录浏览（Browse `0 → PhotoRoot → …`）尚未接入 UI。
 - 视频（MP4/XAVC S）、HEIF、RAW 未处理。
-- 国产 ROM 的 Wi-Fi 绑定/后台限制兼容性待真机验证。
+- 国产 ROM 的 Wi-Fi 绑定/后台限制兼容性待真机验证（目前只测了一台设备）。
 - 相机传完即关热点，一次会话只接收一批；要再传需重新进相机菜单。
+
+## 真机验证记录
+
+2026-10-28 01:37，首版 APK 在真机上一次跑通：
+NFC 读到 `DIRECT-91E0:WWNNL` + 密码 → 连 Wi-Fi → SSDP → `X_TransferStart` → `X_GetPushRoot` →
+`Browse(PushRoot)=1` → 接收 `DSC04303.JPG` → `X_TransferEnd(0)` → 保存到相册（「完成：接收 1/1 张」）。
+截图：`work/p0/evidence/android-first-run-20261028-0137.jpg`。

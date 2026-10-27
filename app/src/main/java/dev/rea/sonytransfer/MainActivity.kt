@@ -184,16 +184,22 @@ class MainActivity : Activity() {
     private fun handleIntent(intent: Intent?) {
         val info = SonyNfc.parse(intent) ?: return
         lastNfc = info
-        statusView.text = info.describe()
         appendLog("== NFC 标签 ==")
-        appendLog(info.describe().replace("\n", " | "))
-        if (!info.ssid.isNullOrEmpty()) {
-            ssidEdit.setText(info.ssid)
-            passEdit.setText(info.password ?: "")
-            connectAndReceive(info.ssid, info.password)
-        } else {
-            appendLog("标签里没有 SSID，需要手动输入")
+        info.describe().lines().filter { it.isNotBlank() }.forEach { appendLog(it) }
+        statusView.text = info.describe()
+
+        val error = SonyNfc.validate(info)
+        if (error != null) {
+            appendLog("NFC 不可用: $error")
+            statusView.text = "NFC: $error"
+            info.ssid?.let { ssidEdit.setText(it) }
+            info.password?.let { passEdit.setText(it) }
+            return
         }
+        val ssid = info.ssid ?: return
+        ssidEdit.setText(ssid)
+        passEdit.setText(info.password ?: "")
+        connectAndReceive(ssid, info.password)
     }
 
     private fun connectAndReceive(ssid: String, pass: String?) {
