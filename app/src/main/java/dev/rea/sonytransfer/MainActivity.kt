@@ -7,16 +7,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Typeface
+import android.media.ExifInterface
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.nfc.NfcAdapter
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
-import android.text.TextUtils
 import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
 import android.view.View
@@ -24,34 +29,36 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.TextView
+import java.io.ByteArrayInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
 
-    private enum class Mode { PUSH, BROWSE }
-
-    private data class Crumb(val id: String, val title: String)
+    private data class ReceivedImage(val name: String, val uri: Uri?, val thumb: Bitmap)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density by lazy { resources.displayMetrics.density }
 
-    // 共用 UI
+    // UI
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private lateinit var ssidEdit: EditText
     private lateinit var passEdit: EditText
-    private lateinit var pushPanel: LinearLayout
-    private lateinit var browsePanel: LinearLayout
-    private lateinit var browsePath: TextView
-    private lateinit var browseHint: TextView
-    private lateinit var browseList: ListView
-    private lateinit var browseAdapter: BrowseAdapter
-    private lateinit var downloadButton: Button
+    private lateinit var previewImage: ImageView
+    private lateinit var previewHint: TextView
+    private lateinit var overallBar: ProgressBar
+    private lateinit var overallText: TextView
+    private lateinit var currentBar: ProgressBar
+    private lateinit var currentText: TextView
+    private lateinit var stripScroll: HorizontalScrollView
+    private lateinit var stripRow: LinearLayout
 
     // 状态
     private lateinit var cameraWifi: CameraWifi
@@ -59,15 +66,16 @@ class MainActivity : Activity() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var lastNfc: CameraNfcInfo? = null
     private var busy = false
-    private var mode = Mode.PUSH
     private var cameraBase: String? = null
 
-    // 浏览状态
-    private val crumbs = ArrayList<Crumb>()
-    private val selectedEntries = LinkedHashMap<String, BrowseEntry>()
-    private var browser: SonyCameraBrowser? = null
-    private var browseBusy = false
-    private var autoDescendDepth = 0
+    // 接收/进度状态
+    private val receivedImages = ArrayList<ReceivedImage>()
+    private var speedIndex = -1
+    private var speedLastBytes = 0L
+    private var speedLastTime = 0L
+    private var speedBps = 0.0
+    private var receiveStartedAt = 0L
+    private var receivedBytes = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,98 +115,90 @@ class MainActivity : Activity() {
         val buttonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val connectButton = Button(this).apply { text = "连接相机"; textSize = 13f }
         val receiveButton = Button(this).apply { text = "开始接收"; textSize = 13f }
-        val browseButton = Button(this).apply { text = "浏览相机"; textSize = 13f }
         val disconnectButton = Button(this).apply { text = "断开"; textSize = 13f }
         buttonRow.addView(connectButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         buttonRow.addView(receiveButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        buttonRow.addView(browseButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         buttonRow.addView(disconnectButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(buttonRow)
 
-        val content = FrameLayout(this)
-        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        pushPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, 0)
+        // 大图预览区
+        val previewFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#1A1A1A"))
         }
-        pushPanel.addView(TextView(this).apply {
-            text = "推送接收（相机端选图）\n" +
-                "① 相机：发送到智能手机 → 在本机上选择 → 勾选照片\n" +
-                "② 手机贴相机 NFC（或填 SSID/密码后点「连接相机」）\n" +
-                "③ 点「开始接收」，照片存到相册 Pictures/SonyTransfer\n\n" +
-                "浏览相机（手机端浏览相册）\n" +
-                "① 相机：发送到智能手机 → 在智能手机上选择\n" +
-                "② 点「浏览相机」，按日期文件夹浏览、勾选下载原图"
-            textSize = 13f
-            setTextColor(Color.DKGRAY)
-        })
-        content.addView(pushPanel, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
-
-        browsePanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-        val navRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val upButton = Button(this).apply { text = "↑ 上级"; textSize = 12f }
-        upButton.setOnClickListener { browseUp() }
-        browsePath = TextView(this).apply {
-            text = "相机"
-            textSize = 13f
-            setSingleLine()
-            ellipsize = TextUtils.TruncateAt.START
-            setTextColor(Color.DKGRAY)
-        }
-        val refreshButton = Button(this).apply { text = "刷新"; textSize = 12f }
-        refreshButton.setOnClickListener {
-            loadChildren(crumbs.lastOrNull()?.id ?: "0")
-        }
-        navRow.addView(upButton)
-        navRow.addView(browsePath, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        navRow.addView(refreshButton)
-        browsePanel.addView(navRow, matchWrap())
-
-        browseAdapter = BrowseAdapter(this, object : BrowseAdapter.Callbacks {
-            override fun onOpenContainer(entry: BrowseEntry) {
-                autoDescendDepth = 0
-                crumbs.add(Crumb(entry.id, entry.title))
-                loadChildren(entry.id)
-            }
-
-            override fun onSelectionChanged(entry: BrowseEntry, selected: Boolean) {
-                if (selected) selectedEntries[entry.id] = entry else selectedEntries.remove(entry.id)
-                updateDownloadButton()
-            }
-        })
-        browseList = ListView(this).apply { adapter = browseAdapter }
-        browsePanel.addView(browseList, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-        ))
-
-        val downloadRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        downloadButton = Button(this).apply { text = "下载选中 (0)"; textSize = 13f }
-        downloadButton.setOnClickListener { downloadSelected() }
-        browseHint = TextView(this).apply {
-            text = "未浏览"
-            textSize = 12f
-            setTextColor(Color.GRAY)
-            setSingleLine()
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        downloadRow.addView(downloadButton)
-        downloadRow.addView(browseHint, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        browsePanel.addView(downloadRow, matchWrap())
-
-        content.addView(browsePanel, FrameLayout.LayoutParams(
+        previewImage = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        previewFrame.addView(previewImage, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        previewHint = TextView(this).apply {
+            text = "预览区"
+            textSize = 12f
+            setTextColor(Color.parseColor("#AAAAAA"))
+            gravity = Gravity.CENTER
+        }
+        previewFrame.addView(previewHint, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        root.addView(previewFrame, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(190),
+        ))
+
+        // 总进度
+        val overallRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        overallBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = 0
+        }
+        overallText = TextView(this).apply {
+            text = "总进度 0/0"
+            textSize = 11f
+            setTextColor(Color.DKGRAY)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        overallRow.addView(overallBar, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+        ))
+        overallRow.addView(overallText)
+        root.addView(overallRow, matchWrap())
+
+        // 当前图片进度 + 速度
+        val currentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(4))
+        }
+        currentBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = 0
+        }
+        currentText = TextView(this).apply {
+            text = "当前：—"
+            textSize = 11f
+            setTextColor(Color.DKGRAY)
+            setPadding(dp(8), 0, 0, 0)
+            setSingleLine()
+        }
+        currentRow.addView(currentBar, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+        ))
+        currentRow.addView(currentText)
+        root.addView(currentRow, matchWrap())
+
+        // 已接收缩略图条（下载完成后可逐张点开预览）
+        stripScroll = HorizontalScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#1A1A1A"))
+            isHorizontalScrollBarEnabled = false
+        }
+        stripRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        stripScroll.addView(stripRow)
+        root.addView(stripScroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(80),
         ))
 
         logView = TextView(this).apply {
@@ -209,7 +209,9 @@ class MainActivity : Activity() {
             movementMethod = ScrollingMovementMethod()
             text = ""
         }
-        root.addView(logView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        root.addView(logView, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
+        ))
 
         setContentView(root)
 
@@ -221,28 +223,11 @@ class MainActivity : Activity() {
             }
             connectCamera(ssid, passEdit.text.toString().ifEmpty { null }) { onCameraConnected() }
         }
-        receiveButton.setOnClickListener {
-            mode = Mode.PUSH
-            switchPanels()
-            ensureConnected { startReceive() }
-        }
-        browseButton.setOnClickListener {
-            mode = Mode.BROWSE
-            switchPanels()
-            ensureConnected { onCameraConnected() }
-        }
+        receiveButton.setOnClickListener { ensureConnected { startReceive() } }
         disconnectButton.setOnClickListener {
-            mode = Mode.PUSH
-            switchPanels()
             cameraWifi.disconnect()
             releaseMulticast()
             cameraBase = null
-            browser = null
-            crumbs.clear()
-            selectedEntries.clear()
-            browseAdapter.submit(emptyList(), emptySet())
-            updateDownloadButton()
-            browseHint.text = "已断开"
             statusView.text = "已断开相机网络"
             appendLog("已断开相机网络")
         }
@@ -253,11 +238,6 @@ class MainActivity : Activity() {
     )
 
     private fun dp(value: Int): Int = (value * density).toInt()
-
-    private fun switchPanels() {
-        pushPanel.visibility = if (mode == Mode.PUSH) View.VISIBLE else View.GONE
-        browsePanel.visibility = if (mode == Mode.BROWSE) View.VISIBLE else View.GONE
-    }
 
     // ------------------------------------------------------------ 权限 / NFC
 
@@ -341,7 +321,7 @@ class MainActivity : Activity() {
         passEdit.setText(info.password ?: "")
         connectCamera(ssid, info.password) {
             onCameraConnected()
-            if (mode == Mode.PUSH) startReceive()
+            startReceive()
         }
     }
 
@@ -397,16 +377,7 @@ class MainActivity : Activity() {
     }
 
     private fun onCameraConnected() {
-        if (browser == null) browser = SonyCameraBrowser { line -> appendLog(line) }
-        if (mode == Mode.BROWSE) {
-            if (crumbs.isEmpty()) {
-                loadChildren("0")
-            } else {
-                loadChildren(crumbs.last().id)
-            }
-        } else {
-            appendLog("已连接相机，可点「开始接收」或「浏览相机」")
-        }
+        appendLog("已连接相机，可点「开始接收」（相机需处于「在本机上选择」并已选图）")
     }
 
     private fun resolveBaseUrl(): String? {
@@ -431,11 +402,14 @@ class MainActivity : Activity() {
         return cameraBase
     }
 
-    // ------------------------------------------------------------ 推送接收
+    // ------------------------------------------------------------ 接收
 
     private fun startReceive() {
         if (busy) return
         busy = true
+        receivedBytes = 0L
+        receiveStartedAt = SystemClock.elapsedRealtime()
+        resetTransferUi()
         Thread {
             val base = resolveBaseUrl()
             if (base == null) {
@@ -445,122 +419,212 @@ class MainActivity : Activity() {
             }
             appendLog("相机 base URL: $base")
             val client = SonyCameraClient { line -> appendLog(line) }
-            val result = client.receivePush(base) { name, data ->
-                val uri = ImageSaver.save(applicationContext, name, data)
-                if (uri != null) {
-                    appendLog(String.format(Locale.US, "已保存 %s (%.1f MB)", name, data.size / 1048576.0))
-                } else {
-                    appendLog("保存失败: $name")
-                }
-                uri != null
-            }
+            val result = client.receivePush(
+                baseUrl = base,
+                onItems = { items -> mainHandler.post { onReceiveItems(items) } },
+                onThumbnail = { bytes ->
+                    val bitmap = decodePreview(bytes)
+                    if (bitmap != null) {
+                        mainHandler.post {
+                            previewImage.setImageBitmap(bitmap)
+                            previewHint.visibility = View.GONE
+                        }
+                    }
+                },
+                onProgress = { progress -> mainHandler.post { renderProgress(progress) } },
+                save = { name, data ->
+                    val uri = ImageSaver.save(applicationContext, name, data)
+                    if (uri != null) {
+                        receivedBytes += data.size
+                        appendLog(
+                            String.format(
+                                Locale.US, "已保存 %s (%.1f MB)",
+                                name, data.size / 1048576.0,
+                            ),
+                        )
+                        val big = decodePreview(data)
+                        val thumb = decodePreview(data, 320)
+                        mainHandler.post {
+                            if (big != null) {
+                                previewImage.setImageBitmap(big)
+                                previewHint.visibility = View.GONE
+                            }
+                            if (thumb != null) addReceivedImage(name, uri, thumb)
+                        }
+                    } else {
+                        appendLog("保存失败: $name")
+                    }
+                    uri != null
+                },
+            )
             appendLog(result.message)
+            val elapsedSeconds = (SystemClock.elapsedRealtime() - receiveStartedAt) / 1000.0
+            if (result.ok && receivedBytes > 0 && elapsedSeconds > 0.1) {
+                appendLog(
+                    String.format(
+                        Locale.US, "用时 %.1f s，平均 %.1f MB/s",
+                        elapsedSeconds, receivedBytes / 1048576.0 / elapsedSeconds,
+                    ),
+                )
+            }
             mainHandler.post {
                 busy = false
+                overallText.text = result.message
+                if (receivedImages.isNotEmpty()) {
+                    previewHint.visibility = View.VISIBLE
+                    previewHint.text = "共 ${receivedImages.size} 张（点下方缩略图查看大图）"
+                }
                 statusView.text = result.message
             }
         }.start()
     }
 
-    // ------------------------------------------------------------ 浏览模式
-
-    private fun loadChildren(objectId: String) {
-        if (browseBusy) return
-        val browser = this.browser ?: run {
-            appendLog("请先连接相机（相机需处于「在智能手机上选择」）")
-            return
+    private fun resetTransferUi() {
+        mainHandler.post {
+            overallBar.progress = 0
+            overallText.text = "总进度 0/0"
+            currentBar.progress = 0
+            currentText.text = "当前：—"
+            previewImage.setImageDrawable(null)
+            previewHint.visibility = View.VISIBLE
+            previewHint.text = "预览区"
+            stripRow.removeAllViews()
+            receivedImages.clear()
+            speedIndex = -1
+            speedLastBytes = 0L
+            speedLastTime = 0L
+            speedBps = 0.0
         }
-        browseBusy = true
-        Thread {
-            try {
-                val base = resolveBaseUrl() ?: throw IllegalStateException("找不到相机地址")
-                browser.useBase(base)
-                val entries = browser.browse(objectId)
-                mainHandler.post {
-                    browseBusy = false
-                    applyEntries(entries)
+    }
+
+    private fun onReceiveItems(items: List<CameraItem>) {
+        overallBar.progress = 0
+        overallText.text = "总进度 0/${items.size}"
+        currentBar.progress = 0
+        currentText.text = "当前：等待开始…"
+        previewHint.visibility = View.VISIBLE
+        previewHint.text = "共 ${items.size} 张，等待相机开始传送…"
+    }
+
+    private fun renderProgress(progress: SonyCameraClient.Progress) {
+        val now = SystemClock.elapsedRealtime()
+        if (progress.index != speedIndex) {
+            speedIndex = progress.index
+            speedLastBytes = 0L
+            speedLastTime = 0L
+            speedBps = 0.0
+        }
+        if (speedLastTime == 0L) {
+            speedLastBytes = progress.downloaded
+            speedLastTime = now
+        } else {
+            val deltaBytes = progress.downloaded - speedLastBytes
+            val deltaSeconds = (now - speedLastTime) / 1000.0
+            if (deltaSeconds >= 0.2) {
+                if (deltaBytes >= 0) {
+                    val instantBps = deltaBytes / deltaSeconds
+                    speedBps = if (speedBps <= 0) instantBps else speedBps * 0.6 + instantBps * 0.4
                 }
-            } catch (e: Exception) {
+                speedLastBytes = progress.downloaded
+                speedLastTime = now
+            }
+        }
+
+        val perFile = if (progress.totalBytes > 0) {
+            (progress.downloaded.toDouble() / progress.totalBytes).coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        val overall = if (progress.total > 0) {
+            ((progress.index + perFile) / progress.total).coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        overallBar.progress = (overall * 1000).toInt().coerceIn(0, 1000)
+        overallText.text = String.format(
+            Locale.US, "总进度 %d/%d · %d%%",
+            progress.index + 1, progress.total, (overall * 100).toInt(),
+        )
+
+        currentBar.progress = (perFile * 1000).toInt().coerceIn(0, 1000)
+        val speedText = when {
+            speedBps >= 1048576 -> String.format(Locale.US, "%.1f MB/s", speedBps / 1048576.0)
+            speedBps >= 1024 -> String.format(Locale.US, "%.0f KB/s", speedBps / 1024.0)
+            else -> "—"
+        }
+        currentText.text = String.format(
+            Locale.US, "%s · %d%% · %s",
+            progress.title, (perFile * 100).toInt(), speedText,
+        )
+        previewHint.text = "${progress.title}（第 ${progress.index + 1}/${progress.total} 张）"
+    }
+
+    private fun addReceivedImage(name: String, uri: Uri?, thumb: Bitmap) {
+        receivedImages.add(ReceivedImage(name, uri, thumb))
+        val item = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setImageBitmap(thumb)
+            setOnClickListener { showFullImage(uri, name) }
+        }
+        val params = LinearLayout.LayoutParams(dp(64), dp(64))
+        params.setMargins(dp(2), 0, dp(2), 0)
+        item.layoutParams = params
+        stripRow.addView(item)
+        stripScroll.post { stripScroll.fullScroll(View.FOCUS_RIGHT) }
+    }
+
+    private fun showFullImage(uri: Uri?, name: String) {
+        if (uri == null) return
+        Thread {
+            val bitmap = runCatching {
+                contentResolver.openInputStream(uri)?.use {
+                    decodePreview(it.readBytes(), 1600)
+                }
+            }.getOrNull()
+            if (bitmap != null) {
                 mainHandler.post {
-                    browseBusy = false
-                    appendLog("浏览失败：${e.message}（相机需处于「在智能手机上选择」）")
-                    browseHint.text = "浏览失败，请检查相机模式"
+                    previewImage.setImageBitmap(bitmap)
+                    previewHint.visibility = View.GONE
+                    statusView.text = "预览：$name（点击其他缩略图切换）"
                 }
             }
         }.start()
     }
 
-    private fun applyEntries(entries: List<BrowseEntry>) {
-        browseAdapter.submit(entries, selectedEntries.keys)
-        updatePath()
-        val folders = entries.count { it.isContainer }
-        val files = entries.size - folders
-        browseHint.text = if (entries.isEmpty()) {
-            "空文件夹"
-        } else {
-            "共 ${entries.size} 项（文件夹 $folders / 照片 $files）"
-        }
-        updateDownloadButton()
-        if (entries.size == 1 && entries[0].isContainer && autoDescendDepth < 4) {
-            autoDescendDepth++
-            crumbs.add(Crumb(entries[0].id, entries[0].title))
-            loadChildren(entries[0].id)
-        } else {
-            autoDescendDepth = 0
-        }
-    }
-
-    private fun updatePath() {
-        browsePath.text = if (crumbs.isEmpty()) {
-            "相机（根）"
-        } else {
-            "相机 / " + crumbs.joinToString(" / ") { it.title }
-        }
-    }
-
-    private fun browseUp() {
-        if (crumbs.isEmpty()) return
-        crumbs.removeAt(crumbs.size - 1)
-        autoDescendDepth = 0
-        loadChildren(crumbs.lastOrNull()?.id ?: "0")
-    }
-
-    private fun updateDownloadButton() {
-        downloadButton.text = "下载选中 (${selectedEntries.size})"
-    }
-
-    private fun downloadSelected() {
-        val items = selectedEntries.values.toList()
-        if (items.isEmpty()) {
-            appendLog("先在列表里勾选照片")
-            return
-        }
-        val browser = this.browser ?: return
-        downloadButton.isEnabled = false
-        Thread {
-            var saved = 0
-            items.forEachIndexed { index, entry ->
-                appendLog("下载 ${index + 1}/${items.size}: ${entry.title}")
-                runCatching { browser.download(entry) }
-                    .onSuccess { data ->
-                        val uri = ImageSaver.save(applicationContext, entry.title, data)
-                        if (uri != null) {
-                            saved++
-                            appendLog(
-                                String.format(
-                                    Locale.US, "已保存 %s (%.1f MB)",
-                                    entry.title, data.size / 1048576.0,
-                                ),
-                            )
-                        } else {
-                            appendLog("保存失败: ${entry.title}")
-                        }
-                    }
-                    .onFailure { appendLog("下载失败 ${entry.title}: ${it.message}") }
+    /** 解码 JPEG 预览：先算采样率（避免 24MP 原图 OOM），再按 EXIF 旋转。 */
+    private fun decodePreview(data: ByteArray, maxDimension: Int = 1280): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            val longest = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longest / sample > maxDimension) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            var bitmap = BitmapFactory.decodeByteArray(data, 0, data.size, options) ?: return null
+            val degrees = try {
+                val orientation = ExifInterface(ByteArrayInputStream(data))
+                    .getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL,
+                    )
+                when (orientation) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } catch (_: Exception) {
+                0f
             }
-            appendLog("浏览下载完成：$saved/${items.size} 张")
-            mainHandler.post { downloadButton.isEnabled = true }
-        }.start()
+            if (degrees != 0f) {
+                val matrix = Matrix().apply { postRotate(degrees) }
+                bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            }
+            bitmap
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // ------------------------------------------------------------ 日志
