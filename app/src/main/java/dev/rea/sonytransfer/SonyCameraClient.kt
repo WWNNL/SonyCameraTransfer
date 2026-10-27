@@ -30,7 +30,7 @@ class SonyCameraClient(private val log: (String) -> Unit) {
         onItems: (List<CameraItem>) -> Unit = {},
         onThumbnail: (ByteArray) -> Unit = {},
         onProgress: (Progress) -> Unit = {},
-        save: (String, ByteArray) -> Boolean,
+        save: (String, String, ByteArray) -> Boolean,
     ): Result {
         return try {
             val ddXml = String(Upnp.httpGetBytes("$baseUrl/dd.xml"), Charsets.UTF_8)
@@ -107,7 +107,7 @@ class SonyCameraClient(private val log: (String) -> Unit) {
                         ),
                     )
                 }
-                if (save(item.title, data)) saved++
+                if (save(item.title, mimeOf(res), data)) saved++
             }
 
             log("X_TransferEnd(0)")
@@ -116,6 +116,11 @@ class SonyCameraClient(private val log: (String) -> Unit) {
         } catch (e: Exception) {
             Result(false, "接收失败：${e.javaClass.simpleName}: ${e.message}", 0)
         }
+    }
+
+    private fun mimeOf(res: ResEntry): String {
+        val mime = res.protocolInfo.split(':').getOrNull(2)?.trim()
+        return if (mime.isNullOrEmpty()) "image/jpeg" else mime
     }
 
     private fun itemsFromDigitalImaging(baseUrl: String): List<CameraItem> {

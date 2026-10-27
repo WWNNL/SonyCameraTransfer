@@ -2,6 +2,7 @@ package dev.rea.sonytransfer
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Typeface
 import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.nfc.NfcAdapter
@@ -36,12 +38,14 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import java.io.ByteArrayInputStream
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 class MainActivity : Activity() {
 
-    private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap)
+    private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap?)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density by lazy { resources.displayMetrics.density }
@@ -456,26 +460,35 @@ class MainActivity : Activity() {
                     }
                 },
                 onProgress = { progress -> mainHandler.post { renderProgress(progress) } },
-                save = { name, data ->
-                    val uri = ImageSaver.save(applicationContext, name, data)
+                save = { name, mime, data ->
+                    val uri = ImageSaver.save(applicationContext, name, mime, data)
                     if (uri != null) {
                         receivedBytes += data.size
+                        val isVideo = ImageSaver.isVideo(mime)
                         appendLog(
                             String.format(
-                                Locale.US, "已保存 %s (%.1f MB)",
+                                Locale.US, "已保存 %s (%.1f MB)%s",
                                 name, data.size / 1048576.0,
+                                if (isVideo) " · 视频" else "",
                             ),
                         )
-                        val big = decodePreview(data)
-                        val thumb = decodePreview(data, 320)
-                        val info = buildImageInfo(name, uri, data)
+                        val thumb = if (isVideo) decodeVideoFrame(uri) else decodePreview(data, 320)
+                        val big = if (isVideo) thumb else decodePreview(data)
+                        val info = if (isVideo) {
+                            buildVideoInfo(name, uri, mime, data.size.toLong())
+                        } else {
+                            buildImageInfo(name, uri, data)
+                        }
                         mainHandler.post {
                             currentImageInfo = info
                             if (big != null) {
                                 previewImage.setImageBitmap(big)
                                 previewHint.visibility = View.GONE
+                            } else if (isVideo) {
+                                previewHint.visibility = View.VISIBLE
+                                previewHint.text = "视频已保存：$name（点缩略图播放）"
                             }
-                            if (thumb != null) addReceivedImage(info, thumb)
+                            addReceivedImage(info, thumb)
                         }
                     } else {
                         appendLog("保存失败: $name")
@@ -587,64 +600,230 @@ class MainActivity : Activity() {
         previewHint.text = "${progress.title}（第 ${progress.index + 1}/${progress.total} 张）"
     }
 
-    private fun addReceivedImage(info: ImageInfo, thumb: Bitmap) {
+    private fun addReceivedImage(info: ImageInfo, thumb: Bitmap?) {
         val image = ReceivedImage(info, thumb)
         receivedImages.add(image)
-        val item = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            setImageBitmap(thumb)
-            setOnClickListener {
-                FullImageViewer(this@MainActivity, image.info) { updated ->
-                    image.info = updated
-                    if (currentImageInfo?.uri == updated.uri) currentImageInfo = updated
-                }.show()
+        val click = View.OnClickListener {
+            FullImageViewer(this@MainActivity, image.info) { updated ->
+                image.info = updated
+                if (currentImageInfo?.uri == updated.uri) currentImageInfo = updated
+            }.show()
+        }
+        val cell = FrameLayout(this).apply {
+            if (thumb != null) {
+                addView(
+                    ImageView(this@MainActivity).apply {
+                        scaleType = ImageView.ScaleType.CENTER_CROP
+                        setImageBitmap(thumb)
+                    },
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            } else {
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = if (info.isVideo) "视频" else "图片"
+                        textSize = 10f
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+                    },
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
             }
+            if (info.isVideo) {
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = "▶"
+                        textSize = 18f
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+                        setBackgroundColor(Color.parseColor("#55000000"))
+                    },
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+            setOnClickListener(click)
         }
         val params = LinearLayout.LayoutParams(dp(64), dp(64))
         params.setMargins(dp(2), 0, dp(2), 0)
-        item.layoutParams = params
-        stripRow.addView(item)
+        cell.layoutParams = params
+        stripRow.addView(cell)
         stripScroll.post { stripScroll.fullScroll(View.FOCUS_RIGHT) }
         updateBatchButton()
     }
 
+    /** 视频取首帧作为预览图 / 缩略图。 */
+    private fun decodeVideoFrame(uri: Uri?): Bitmap? {
+        if (uri == null) return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(this, uri)
+            retriever.getFrameAtTime(0)
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun buildVideoInfo(name: String, uri: Uri?, mime: String, bytes: Long): ImageInfo {
+        var width = 0
+        var height = 0
+        var durationMs = 0L
+        var takenAt: String? = null
+        if (uri != null) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(this, uri)
+                width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    ?.toIntOrNull() ?: 0
+                height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    ?.toIntOrNull() ?: 0
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull() ?: 0L
+                takenAt = formatMp4Date(
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE),
+                )
+            } catch (_: Exception) {
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+        return ImageInfo(
+            name = name,
+            uri = uri,
+            bytes = bytes,
+            width = width,
+            height = height,
+            takenAt = takenAt,
+            camera = null,
+            exposure = null,
+            aperture = null,
+            iso = null,
+            focalLength = null,
+            isVideo = true,
+            durationMs = durationMs,
+            mime = mime,
+        )
+    }
+
+    /** MP4 里常见的几种日期格式 → "yyyy-MM-dd HH:mm:ss"。 */
+    private fun formatMp4Date(raw: String?): String? {
+        val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val patterns = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyyMMdd'T'HHmmss.SSS'Z'",
+            "yyyyMMdd'T'HHmmss'Z'",
+            "yyyyMMdd'T'HHmmss",
+            "yyyy:MM:dd HH:mm:ss",
+        )
+        for (pattern in patterns) {
+            val date = runCatching {
+                SimpleDateFormat(pattern, Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.parse(value)
+            }.getOrNull()
+            if (date != null) {
+                return SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(date)
+            }
+        }
+        return null
+    }
+
     private fun updateBatchButton() {
-        batchButton.text = "批量改本次日期（${receivedImages.size} 张）"
+        batchButton.text = "按偏移量改日期（${receivedImages.size} 张）"
         batchButton.isEnabled = receivedImages.isNotEmpty()
     }
 
-    /** 把本批（本次会话接收的）所有照片日期统一改掉。 */
+    /** 按偏移量整体平移本批照片/视频的日期（保留彼此之间的时间差）。 */
     private fun editAllDates() {
         val images = receivedImages.toList()
         if (images.isEmpty()) {
             appendLog("还没有已接收的图片")
             return
         }
-        PhotoDates.showPicker(this, images.first().info.takenAt) { calendar ->
-            val editor = PhotoDateEditor(this)
-            val newTaken = PhotoDates.displayString(calendar)
-            appendLog("批量改日期 -> $newTaken（${images.size} 张）")
-            Thread {
-                var ok = 0
-                images.forEach { image ->
-                    val result = editor.updateDate(image.info.uri, calendar)
-                    if (result.ok) {
-                        ok++
-                        image.info = image.info.copy(takenAt = newTaken)
-                    } else {
-                        appendLog("改日期失败 ${image.info.name}: ${result.message}")
-                    }
-                }
-                appendLog("批量改日期完成：$ok/${images.size} 张 -> $newTaken")
-                mainHandler.post {
-                    if (currentImageInfo != null) {
-                        receivedImages.firstOrNull { it.info.uri == currentImageInfo?.uri }
-                            ?.let { currentImageInfo = it.info }
-                    }
-                    updateBatchButton()
-                }
-            }.start()
+        val labels = listOf("年", "月", "日", "时", "分")
+        val edits = labels.map {
+            EditText(this).apply {
+                hint = "偏移$it（正数往后，负数往前）"
+                inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+                setSingleLine()
+            }
         }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        edits.forEach { layout.addView(it, matchWrap()) }
+        AlertDialog.Builder(this)
+            .setTitle("按偏移量平移日期（${images.size} 张）")
+            .setMessage("每张按各自原拍摄时间加上偏移量，照片之间的相对时间差保持不变。例如全部 +10 年。")
+            .setView(layout)
+            .setPositiveButton("应用") { _, _ ->
+                val delta = edits.map { it.text.toString().trim().toIntOrNull() ?: 0 }
+                applyDateOffset(images, delta)
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun applyDateOffset(images: List<ReceivedImage>, delta: List<Int>) {
+        val years = delta.getOrElse(0) { 0 }
+        val months = delta.getOrElse(1) { 0 }
+        val days = delta.getOrElse(2) { 0 }
+        val hours = delta.getOrElse(3) { 0 }
+        val minutes = delta.getOrElse(4) { 0 }
+        if (years == 0 && months == 0 && days == 0 && hours == 0 && minutes == 0) {
+            appendLog("偏移量全为 0，未修改")
+            return
+        }
+        appendLog(
+            "按偏移量平移日期：${years}年 ${months}月 ${days}日 ${hours}时 ${minutes}分（${images.size} 张）",
+        )
+        val editor = PhotoDateEditor(this)
+        Thread {
+            var ok = 0
+            images.forEach { image ->
+                val base = PhotoDates.parseDisplay(image.info.takenAt)
+                if (base == null) {
+                    appendLog("跳过 ${image.info.name}：没有可用的拍摄时间")
+                    return@forEach
+                }
+                val calendar = Calendar.getInstance().apply {
+                    time = base
+                    add(Calendar.YEAR, years)
+                    add(Calendar.MONTH, months)
+                    add(Calendar.DAY_OF_MONTH, days)
+                    add(Calendar.HOUR_OF_DAY, hours)
+                    add(Calendar.MINUTE, minutes)
+                }
+                val result = editor.updateDate(image.info.uri, calendar, image.info.isVideo)
+                if (result.ok) {
+                    ok++
+                    image.info = image.info.copy(takenAt = PhotoDates.displayString(calendar))
+                } else {
+                    appendLog("改日期失败 ${image.info.name}: ${result.message}")
+                }
+            }
+            appendLog("偏移完成：$ok/${images.size} 张")
+            mainHandler.post {
+                if (currentImageInfo != null) {
+                    receivedImages.firstOrNull { it.info.uri == currentImageInfo?.uri }
+                        ?.let { currentImageInfo = it.info }
+                }
+                updateBatchButton()
+            }
+        }.start()
     }
 
     /** 保存时从 JPEG 读取 EXIF，构建图片详情（供侧栏显示）。 */

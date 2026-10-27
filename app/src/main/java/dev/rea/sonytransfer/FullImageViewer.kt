@@ -23,13 +23,15 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.MediaController
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.VideoView
 import java.io.ByteArrayInputStream
 import java.util.Locale
 
-/** 一张已接收图片的详细信息（保存时从 JPEG 的 EXIF 读取）。 */
+/** 一张已接收文件（图片或视频）的详细信息。 */
 data class ImageInfo(
     val name: String,
     val uri: Uri?,
@@ -42,18 +44,32 @@ data class ImageInfo(
     val aperture: String?,
     val iso: String?,
     val focalLength: String?,
+    val isVideo: Boolean = false,
+    val durationMs: Long = 0L,
+    val mime: String = "image/jpeg",
 ) {
     val sizeText: String
         get() = String.format(Locale.US, "%.1f MB（%d 字节）", bytes / 1048576.0, bytes)
 
     val resolutionText: String
         get() = if (width > 0 && height > 0) {
-            String.format(
-                Locale.US, "%d × %d（%.1f MP）",
-                width, height, width.toDouble() * height / 1_000_000.0,
-            )
+            if (isVideo) {
+                String.format(Locale.US, "%d × %d", width, height)
+            } else {
+                String.format(
+                    Locale.US, "%d × %d（%.1f MP）",
+                    width, height, width.toDouble() * height / 1_000_000.0,
+                )
+            }
         } else {
             "—"
+        }
+
+    val durationText: String
+        get() {
+            if (durationMs <= 0) return "—"
+            val totalSeconds = durationMs / 1000
+            return String.format(Locale.US, "%d:%02d", totalSeconds / 60, totalSeconds % 60)
         }
 
     val takenText: String get() = takenAt ?: "—"
@@ -65,13 +81,15 @@ data class ImageInfo(
             .joinToString(" · ")
             .ifEmpty { "—" }
 
-    val locationText: String get() = "Pictures/SonyTransfer"
+    val locationText: String
+        get() = if (isVideo) "Movies/SonyTransfer" else "Pictures/SonyTransfer"
 }
 
 /**
- * 全屏图片查看器：
- *  - 图片区支持双指缩放（1x~8x）、单指拖动、双击缩放；
- *  - 右侧信息侧栏显示当前图片的详细信息，可用右上角「信息」按钮收起/展开。
+ * 全屏查看器：
+ *  - 图片：双指缩放（1x~8x）、单指拖动、双击缩放；
+ *  - 视频：VideoView + 系统播放控制条；
+ *  - 右侧信息侧栏为半透明浮层（覆盖在图片上，不挤压图片），可收起/展开。
  */
 class FullImageViewer(
     private val context: Context,
@@ -88,23 +106,31 @@ class FullImageViewer(
 
     fun show() {
         val root = FrameLayout(context).apply { setBackgroundColor(Color.BLACK) }
-        val content = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         val imageContainer = FrameLayout(context).apply { setBackgroundColor(Color.BLACK) }
 
-        val zoomView = ZoomImageView(context)
-        imageContainer.addView(zoomView, FrameLayout.LayoutParams(MATCH, MATCH))
-        val loading = TextView(context).apply {
-            text = "加载中…"
-            textSize = 13f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
+        var zoomView: ZoomImageView? = null
+        var loading: TextView? = null
+        if (imageInfo.isVideo) {
+            setupVideo(imageContainer)
+        } else {
+            zoomView = ZoomImageView(context)
+            imageContainer.addView(zoomView, FrameLayout.LayoutParams(MATCH, MATCH))
+            loading = TextView(context).apply {
+                text = "加载中…"
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+            }
+            imageContainer.addView(loading, FrameLayout.LayoutParams(MATCH, MATCH))
         }
-        imageContainer.addView(loading, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(imageContainer, FrameLayout.LayoutParams(MATCH, MATCH))
 
+        // 信息侧栏：半透明浮层，覆盖在图片右侧（不挤压图片）
         val sidebar = buildSidebar()
-        content.addView(imageContainer, LinearLayout.LayoutParams(0, MATCH, 1f))
-        content.addView(sidebar, LinearLayout.LayoutParams(dp(190), MATCH))
-        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(
+            sidebar,
+            FrameLayout.LayoutParams(dp(190), MATCH).apply { gravity = Gravity.END },
+        )
 
         val closeButton = Button(context).apply {
             text = "✕"
@@ -136,17 +162,41 @@ class FullImageViewer(
         dialog.setContentView(root)
         dialog.show()
 
-        Thread {
-            val bitmap = decodeImage(2048)
-            mainHandler.post {
-                if (bitmap != null) {
-                    zoomView.setImage(bitmap)
-                    loading.visibility = View.GONE
-                } else {
-                    loading.text = "图片加载失败"
+        val view = zoomView
+        val hint = loading
+        if (view != null) {
+            Thread {
+                val bitmap = decodeImage(2048)
+                mainHandler.post {
+                    if (bitmap != null) {
+                        view.setImage(bitmap)
+                        hint?.visibility = View.GONE
+                    } else {
+                        hint?.text = "图片加载失败"
+                    }
                 }
-            }
-        }.start()
+            }.start()
+        }
+    }
+
+    // ------------------------------------------------------------ 视频播放
+
+    private fun setupVideo(container: FrameLayout) {
+        val uri = imageInfo.uri ?: return
+        val videoView = VideoView(context)
+        container.addView(videoView, FrameLayout.LayoutParams(MATCH, MATCH))
+        val controller = MediaController(context)
+        controller.setAnchorView(videoView)
+        videoView.setMediaController(controller)
+        videoView.setVideoURI(uri)
+        videoView.setOnPreparedListener {
+            it.isLooping = false
+            videoView.start()
+        }
+        videoView.setOnErrorListener { _, _, _ ->
+            Toast.makeText(context, "视频播放失败", Toast.LENGTH_SHORT).show()
+            true
+        }
     }
 
     // ------------------------------------------------------------ 信息侧栏
@@ -154,12 +204,13 @@ class FullImageViewer(
     private fun buildSidebar(): LinearLayout {
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#1E1E1E"))
-            setPadding(dp(14), dp(22), dp(14), dp(14))
+            // 半透明覆盖层（80% 不透明）
+            setBackgroundColor(Color.parseColor("#CC1E1E1E"))
+            setPadding(dp(14), dp(58), dp(14), dp(14))
         }
         panel.addView(
             TextView(context).apply {
-                text = "图片信息"
+                text = if (imageInfo.isVideo) "视频信息" else "图片信息"
                 textSize = 15f
                 setTextColor(Color.WHITE)
                 typeface = Typeface.DEFAULT_BOLD
@@ -170,9 +221,14 @@ class FullImageViewer(
         addRow(list, "文件名", imageInfo.name)
         addRow(list, "大小", imageInfo.sizeText)
         addRow(list, "分辨率", imageInfo.resolutionText)
+        if (imageInfo.isVideo) {
+            addRow(list, "时长", imageInfo.durationText)
+        }
         takenRow = addRow(list, "拍摄时间", imageInfo.takenText)
         addRow(list, "相机", imageInfo.cameraText)
-        addRow(list, "曝光参数", imageInfo.exposureText)
+        if (!imageInfo.isVideo) {
+            addRow(list, "曝光参数", imageInfo.exposureText)
+        }
         addRow(list, "保存位置", imageInfo.locationText)
         val scroll = ScrollView(context).apply { addView(list) }
         panel.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
@@ -208,12 +264,13 @@ class FullImageViewer(
         return valueView
     }
 
-    /** 修改当前照片的拍摄日期（EXIF + 相册日期）。 */
+    /** 修改当前文件的拍摄日期（图片改 EXIF + 相册；视频仅改相册日期）。 */
     private fun openDatePicker() {
         val activity = context as? Activity ?: return
         PhotoDates.showPicker(activity, imageInfo.takenAt) { calendar ->
             Thread {
-                val result = PhotoDateEditor(context).updateDate(imageInfo.uri, calendar)
+                val result = PhotoDateEditor(context)
+                    .updateDate(imageInfo.uri, calendar, imageInfo.isVideo)
                 mainHandler.post {
                     if (result.ok) {
                         imageInfo = imageInfo.copy(takenAt = PhotoDates.displayString(calendar))

@@ -24,9 +24,18 @@ class PhotoDateEditor(private val context: Context) {
 
     data class UpdateResult(val ok: Boolean, val message: String, val epochMillis: Long)
 
-    fun updateDate(uri: Uri?, calendar: Calendar): UpdateResult {
+    fun updateDate(uri: Uri?, calendar: Calendar, isVideo: Boolean = false): UpdateResult {
         if (uri == null) return UpdateResult(false, "没有可修改的照片", 0L)
         return try {
+            if (isVideo) {
+                updateMediaStore(uri, calendar)
+                rescanIfNeeded(uri)
+                return UpdateResult(
+                    true,
+                    "视频相册日期已改为 ${PhotoDates.displayString(calendar)}",
+                    calendar.timeInMillis,
+                )
+            }
             val original = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                 ?: return UpdateResult(false, "读取照片失败", 0L)
             val patched = runCatching { patchExif(original, calendar) }.getOrNull()
@@ -64,10 +73,17 @@ class PhotoDateEditor(private val context: Context) {
     }
 
     private fun writeBytes(uri: Uri, bytes: ByteArray) {
-        val output = context.contentResolver.openOutputStream(uri, "wt")
-            ?: context.contentResolver.openOutputStream(uri, "w")
-            ?: throw IllegalStateException("无法写入照片")
-        output.use { it.write(bytes) }
+        var lastError: Exception? = null
+        for (mode in listOf("wt", "w")) {
+            try {
+                val output = context.contentResolver.openOutputStream(uri, mode) ?: continue
+                output.use { it.write(bytes) }
+                return
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IllegalStateException("无法写入照片")
     }
 
     private fun updateMediaStore(uri: Uri, calendar: Calendar) {
@@ -130,4 +146,11 @@ object PhotoDates {
 
     fun displayString(calendar: Calendar): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(calendar.time)
+
+    fun parseDisplay(value: String?): Date? {
+        val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return runCatching {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).parse(raw)
+        }.getOrNull()
+    }
 }
