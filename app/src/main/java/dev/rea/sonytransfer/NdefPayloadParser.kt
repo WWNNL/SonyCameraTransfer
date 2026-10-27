@@ -16,7 +16,7 @@ package dev.rea.sonytransfer
  *                             + WPS[18] + Freq[19] + Channel[20] + WPS PIN[21..]
  *   0x1003 DeviceDescriptionURL 开头字节 1=http/2=https + IP[1..4] + Port[5..6](BE)
  *                             + hostLen[7] + host[8..]（拼成 scheme://ip:port/host.xml）
- *   0x1004 WifiSetting        传 "01" 表示 Wi-Fi 可用，"00" 表示不可用
+ *   0x1004 WifiSetting        非全 0 时： "01"=Wi-Fi 可用，其它值=不可用；全 0 视为无此字段（官方语义）
  *
  * 实测 a6300 标签只有 Version + SSID + Password（没有 IP/DD/网络信息段），
  * 因此 IP/DD 字段允许为 null，发现相机走 SSDP。
@@ -209,7 +209,7 @@ object NdefPayloadParser {
         return String(bytes, Charsets.UTF_8).trim('\u0000').trim()
     }
 
-    private fun isAllZero(bytes: ByteArray): Boolean = bytes.all { it.toInt() and 0xFF == 0 }
+    private fun isAllZero(bytes: ByteArray): Boolean = bytes.all { (it.toInt() and 0xFF) == 0 }
 
     private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
 }

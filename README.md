@@ -58,8 +58,8 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 
 ## 已知限制 / TODO
 
-- NFC 实机已能读到 SSID/密码（2026-10-28 真机一次跑通全链路）；IP/DD-URL 字段暂未解析出来
-  （可能是 a6300 标签未写，或 TLV 偏移问题——v0.2.0 起日志会打印原始 NDEF hex 便于定位）。
+- NFC 已真机验证；**a6300 的标签只有 3 个 TLV（版本 + SSID + 密码，共 38 字节）**，没有 IP/DD-URL 段，
+  所以相机发现用 SSDP（官方 App 同样如此）。完整标签（含网络信息/DD-URL）的机型也已在解析器里支持，并有单测覆盖。
 - 目前只做「在本机上选择」推送接收；「在智能手机上选择」的目录浏览（Browse `0 → PhotoRoot → …`）尚未接入 UI。
 - 视频（MP4/XAVC S）、HEIF、RAW 未处理。
 - 国产 ROM 的 Wi-Fi 绑定/后台限制兼容性待真机验证（目前只测了一台设备）。
