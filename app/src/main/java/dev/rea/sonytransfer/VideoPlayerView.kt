@@ -335,12 +335,34 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
         val effectiveWidth = if (rotated) videoHeight else videoWidth
         val effectiveHeight = if (rotated) videoWidth else videoHeight
         val fitScale = minOf(viewWidth / effectiveWidth, viewHeight / effectiveHeight)
+        // 撤销 TextureView 默认拉伸：缩放后内容尺寸 = fitScale * 视频尺寸
         val scaleX = fitScale * videoWidth / viewWidth
         val scaleY = fitScale * videoHeight / viewHeight
-        val displayedWidth = fitScale * effectiveWidth
-        val displayedHeight = fitScale * effectiveHeight
-        val translateX = (viewWidth - displayedWidth) / 2f
-        val translateY = (viewHeight - displayedHeight) / 2f
+        // postRotate 绕原点旋转，旋转后的矩形中心不在原点，需要按旋转后的中心重新居中
+        val scaledWidth = fitScale * videoWidth
+        val scaledHeight = fitScale * videoHeight
+        val rotatedCenterX: Float
+        val rotatedCenterY: Float
+        when (rotationDegrees) {
+            90 -> {
+                rotatedCenterX = -scaledHeight / 2f
+                rotatedCenterY = scaledWidth / 2f
+            }
+            180 -> {
+                rotatedCenterX = -scaledWidth / 2f
+                rotatedCenterY = -scaledHeight / 2f
+            }
+            270 -> {
+                rotatedCenterX = scaledHeight / 2f
+                rotatedCenterY = -scaledWidth / 2f
+            }
+            else -> {
+                rotatedCenterX = scaledWidth / 2f
+                rotatedCenterY = scaledHeight / 2f
+            }
+        }
+        val translateX = viewWidth / 2f - rotatedCenterX
+        val translateY = viewHeight / 2f - rotatedCenterY
         baseMatrix.reset()
         baseMatrix.postScale(scaleX, scaleY)
         baseMatrix.postRotate(rotationDegrees.toFloat())
