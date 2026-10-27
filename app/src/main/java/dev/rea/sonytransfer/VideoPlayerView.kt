@@ -308,15 +308,24 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
         setTransform(display)
     }
 
-    /** 视频按比例居中：scale = min(视图宽/视频宽, 视图高/视频高)，再加偏移居中。 */
+    /**
+     * 视频按比例居中。
+     *
+     * 注意：TextureView 的默认变换是「把视频拉伸铺满整个视图」，所以不能直接套等比缩放；
+     * 要用非等比缩放（scaleX/scaleY）把默认拉伸还原，再平移到居中位置。
+     */
     private fun resetBase() {
         if (videoWidth <= 0 || videoHeight <= 0 || width == 0 || height == 0) return
-        val scale = minOf(width.toFloat() / videoWidth, height.toFloat() / videoHeight)
-        val dx = (width - videoWidth * scale) / 2f
-        val dy = (height - videoHeight * scale) / 2f
+        val viewWidth = width.toFloat()
+        val viewHeight = height.toFloat()
+        val fitScale = minOf(viewWidth / videoWidth, viewHeight / videoHeight)
+        val scaleX = fitScale * videoWidth / viewWidth
+        val scaleY = fitScale * videoHeight / viewHeight
+        val translateX = (viewWidth - fitScale * videoWidth) / 2f
+        val translateY = (viewHeight - fitScale * videoHeight) / 2f
         baseMatrix.reset()
-        baseMatrix.postScale(scale, scale)
-        baseMatrix.postTranslate(dx, dy)
+        baseMatrix.postScale(scaleX, scaleY)
+        baseMatrix.postTranslate(translateX, translateY)
         suppMatrix.reset()
         applyTransform()
     }
@@ -327,7 +336,8 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
             set(suppMatrix)
             postConcat(baseMatrix)
         }
-        val rect = RectF(0f, 0f, videoWidth.toFloat(), videoHeight.toFloat())
+        // 视频在视图里实际占用的矩形：默认铺满的视图矩形经过 base 变换后的范围
+        val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())
         display.mapRect(rect)
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()

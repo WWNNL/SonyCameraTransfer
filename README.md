@@ -21,7 +21,7 @@
    - 单张：全屏查看器侧栏「修改日期」→ 选目标日期（可用于个别拍歪时间）；
    - 整批：主界面「按偏移量改日期」→ 输入 年/月/日/时/分 偏移（如全部 +10 年），每张按各自原时间平移，**彼此相对时间差保持不变**；
    - 图片同时改写 EXIF（DateTime / DateTimeOriginal / DateTimeDigitized）和 MediaStore `DATE_TAKEN`；视频只改相册日期；相册排序/显示同步更新。
-9. **视频接收/预览**：相机端发送视频时按 `video/mp4` 保存到 `Movies/SonyTransfer`；缩略图条用视频首帧，点击全屏可直接播放（系统播放控制条）。
+9. **视频接收/预览**：相机端发送视频时按 `video/mp4` 保存到 `Movies/SonyTransfer`；缩略图条用视频首帧，点击全屏播放（自绘播放器：按比例居中不变形、双指/双击缩放、拖动、底部播放/暂停与进度条）。
 10. 手动兜底：直接输入 SSID/密码连接、断开、实时日志。
 
 ## 构建
@@ -67,6 +67,7 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 | `Upnp.kt` | HTTP GET（流式+进度回调）/ SOAP / DD 解析 / DIDL 解析 / res 选择 |
 | `SonyCameraClient.kt` | 「在本机上选择」完整接收时序（含进度、缩略图、图片/视频类型回调） |
 | `FullImageViewer.kt` | 全屏查看器（图片双指缩放 / 视频播放）+ 半透明信息侧栏 |
+| `VideoPlayerView.kt` | 视频播放器：TextureView + MediaPlayer + 缩放/拖动 + 自绘控制条 |
 | `PhotoDateEditor.kt` | 修改日期（EXIF + MediaStore）、日期选择/偏移工具 |
 | `ImageSaver.kt` | 保存（图片 Pictures、视频 Movies；API 29+ MediaStore / 旧版公共目录） |
 
