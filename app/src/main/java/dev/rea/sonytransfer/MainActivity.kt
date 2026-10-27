@@ -17,6 +17,7 @@ import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.content.res.Configuration
 import android.nfc.NfcAdapter
 import android.os.Build
 import android.os.Bundle
@@ -54,6 +55,8 @@ class MainActivity : Activity() {
     // UI
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
+    private lateinit var rootView: LinearLayout
+    private lateinit var scrollView: ScrollView
     private lateinit var ssidEdit: EditText
     private lateinit var passEdit: EditText
     private lateinit var previewImage: ImageView
@@ -100,6 +103,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(14), dp(14), dp(8))
         }
+        rootView = root
 
         statusView = TextView(this).apply {
             textSize = 13f
@@ -250,7 +254,12 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
         }
+        scrollView = scroll
+        scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> adjustLogHeight() }
         setContentView(scroll)
+
+        // 首帧后让日志框占满剩余高度（竖屏铺满，横屏限高）
+        scroll.post { adjustLogHeight() }
 
         connectButton.setOnClickListener {
             val ssid = ssidEdit.text.toString().trim()
@@ -275,6 +284,40 @@ class MainActivity : Activity() {
     )
 
     private fun dp(value: Int): Int = (value * density).toInt()
+
+    /**
+     * 日志框高度：竖屏占满剩余屏幕空间；横屏限高（最小 96dp / 最大 220dp），
+     * 高度不够时整页可上下滚动。
+     */
+    private fun adjustLogHeight() {
+        if (!::scrollView.isInitialized || !::rootView.isInitialized || !::logView.isInitialized) return
+        val viewportHeight = scrollView.height
+        if (viewportHeight <= 0 || rootView.height <= 0) return
+
+        var fixedHeight = rootView.paddingTop + rootView.paddingBottom
+        for (index in 0 until rootView.childCount) {
+            val child = rootView.getChildAt(index)
+            if (child === logView) continue
+            fixedHeight += child.height
+            val params = child.layoutParams as? LinearLayout.LayoutParams
+            if (params != null) fixedHeight += params.topMargin + params.bottomMargin
+        }
+        val available = viewportHeight - fixedHeight
+        val target = if (isLandscape()) {
+            available.coerceIn(dp(96), dp(220))
+        } else {
+            maxOf(available, dp(140))
+        }
+        val current = logView.layoutParams.height
+        if (current != target) {
+            logView.layoutParams = (logView.layoutParams as LinearLayout.LayoutParams).apply {
+                height = target
+            }
+        }
+    }
+
+    private fun isLandscape(): Boolean =
+        resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     // ------------------------------------------------------------ 权限 / NFC
 
