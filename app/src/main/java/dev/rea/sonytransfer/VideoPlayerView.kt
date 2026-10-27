@@ -139,6 +139,11 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         }
     }
 
+    /** 预览旋转 90°（只转显示，不改原文件）。 */
+    fun rotateView() {
+        textureView.rotate90()
+    }
+
     private fun prepare(uri: Uri) {
         if (prepared) return
         try {
@@ -205,6 +210,7 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     private val matrixValues = FloatArray(9)
     private var videoWidth = 0
     private var videoHeight = 0
+    private var rotationDegrees = 0
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -279,6 +285,12 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
         post { resetBase() }
     }
 
+    /** 旋转 90°（只影响预览显示）。 */
+    fun rotate90() {
+        rotationDegrees = (rotationDegrees + 90) % 360
+        resetBase()
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         resetBase()
@@ -318,13 +330,20 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
         if (videoWidth <= 0 || videoHeight <= 0 || width == 0 || height == 0) return
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()
-        val fitScale = minOf(viewWidth / videoWidth, viewHeight / videoHeight)
+        // 旋转 90/270 时宽高互换，按旋转后的有效尺寸做适配
+        val rotated = rotationDegrees % 180 != 0
+        val effectiveWidth = if (rotated) videoHeight else videoWidth
+        val effectiveHeight = if (rotated) videoWidth else videoHeight
+        val fitScale = minOf(viewWidth / effectiveWidth, viewHeight / effectiveHeight)
         val scaleX = fitScale * videoWidth / viewWidth
         val scaleY = fitScale * videoHeight / viewHeight
-        val translateX = (viewWidth - fitScale * videoWidth) / 2f
-        val translateY = (viewHeight - fitScale * videoHeight) / 2f
+        val displayedWidth = fitScale * effectiveWidth
+        val displayedHeight = fitScale * effectiveHeight
+        val translateX = (viewWidth - displayedWidth) / 2f
+        val translateY = (viewHeight - displayedHeight) / 2f
         baseMatrix.reset()
         baseMatrix.postScale(scaleX, scaleY)
+        baseMatrix.postRotate(rotationDegrees.toFloat())
         baseMatrix.postTranslate(translateX, translateY)
         suppMatrix.reset()
         applyTransform()

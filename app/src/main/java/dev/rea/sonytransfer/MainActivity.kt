@@ -35,6 +35,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayInputStream
 import java.text.SimpleDateFormat
@@ -238,10 +239,18 @@ class MainActivity : Activity() {
             text = ""
         }
         root.addView(logView, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(150),
         ))
 
-        setContentView(root)
+        // 外层滚动容器：横屏/小屏时内容可以上下滑动，不会因为高度不够被裁掉
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(root, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+        setContentView(scroll)
 
         connectButton.setOnClickListener {
             val ssid = ssidEdit.text.toString().trim()

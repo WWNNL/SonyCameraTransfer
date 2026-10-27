@@ -97,6 +97,10 @@ class FullImageViewer(
 
     private var imageInfo = info
     private var takenRow: TextView? = null
+    private var zoomView: ZoomImageView? = null
+    private var videoPlayer: VideoPlayerView? = null
+    private var originalBitmap: Bitmap? = null
+    private var rotationDegrees = 0
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
@@ -112,6 +116,7 @@ class FullImageViewer(
             setupVideo(imageContainer)
         } else {
             zoomView = ZoomImageView(context)
+            this.zoomView = zoomView
             imageContainer.addView(zoomView, FrameLayout.LayoutParams(MATCH, MATCH))
             loading = TextView(context).apply {
                 text = "加载中…"
@@ -141,6 +146,18 @@ class FullImageViewer(
             FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP or Gravity.START)
                 .apply { setMargins(dp(10), dp(10), 0, 0) },
         )
+        val rotateButton = Button(context).apply {
+            text = "旋转"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#80000000"))
+        }
+        root.addView(
+            rotateButton,
+            FrameLayout.LayoutParams(dp(58), dp(44), Gravity.TOP or Gravity.END)
+                .apply { setMargins(0, dp(10), dp(74), 0) },
+        )
+        rotateButton.setOnClickListener { rotateView() }
         val toggleButton = Button(context).apply {
             text = "信息"
             textSize = 12f
@@ -167,6 +184,7 @@ class FullImageViewer(
                 val bitmap = decodeImage(2048)
                 mainHandler.post {
                     if (bitmap != null) {
+                        originalBitmap = bitmap
                         view.setImage(bitmap)
                         hint?.visibility = View.GONE
                     } else {
@@ -177,11 +195,34 @@ class FullImageViewer(
         }
     }
 
+    // ------------------------------------------------------------ 旋转
+
+    /** 预览旋转 90°：图片直接旋转位图，视频旋转显示变换（不改变原文件）。 */
+    private fun rotateView() {
+        if (imageInfo.isVideo) {
+            videoPlayer?.rotateView()
+            return
+        }
+        val view = zoomView ?: return
+        val original = originalBitmap ?: return
+        rotationDegrees = (rotationDegrees + 90) % 360
+        val rotated = if (rotationDegrees == 0) {
+            original
+        } else {
+            Bitmap.createBitmap(
+                original, 0, 0, original.width, original.height,
+                Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true,
+            )
+        }
+        view.setImage(rotated)
+    }
+
     // ------------------------------------------------------------ 视频播放
 
     private fun setupVideo(container: FrameLayout) {
         val uri = imageInfo.uri ?: return
         val player = VideoPlayerView(context)
+        videoPlayer = player
         container.addView(player, FrameLayout.LayoutParams(MATCH, MATCH))
         player.setVideo(uri)
         dialog.setOnDismissListener { player.release() }
