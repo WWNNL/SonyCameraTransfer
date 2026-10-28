@@ -26,6 +26,16 @@ class CameraWifi(private val context: Context) {
     var network: Network? = null
         private set
 
+    /**
+     * 复用手机已经连上的网络（例如用户手动在系统设置里连过相机热点）：
+     * 不再发 WifiNetworkSpecifier 请求，也就不会弹系统确认框，连接几乎瞬间完成。
+     */
+    fun attachExisting(existing: Network) {
+        disconnect()
+        network = existing
+        connectivityManager.bindProcessToNetwork(existing)
+    }
+
     fun connect(ssid: String, passphrase: String?, timeoutMs: Int = 40000, onResult: (Boolean, String) -> Unit) {
         disconnect()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

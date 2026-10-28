@@ -149,6 +149,36 @@ object Upnp {
         }
     }
 
+    /**
+     * 快速探测某个 base URL 是否真的是索尼相机的 UPnP 根（dd.xml）。
+     * 用于跳过 SSDP 广播等待：已知/猜测的地址先探测，命中就直接用。
+     */
+    fun probeCamera(baseUrl: String, timeoutMs: Int = 900): Boolean {
+        val url = baseUrl.trimEnd('/') + "/dd.xml"
+        var conn: HttpURLConnection? = null
+        return try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            conn = c
+            c.requestMethod = "GET"
+            c.connectTimeout = timeoutMs
+            c.readTimeout = timeoutMs
+            c.setRequestProperty("Connection", "close")
+            if (c.responseCode != 200) {
+                false
+            } else {
+                val text = c.inputStream.use {
+                    String(it.readBytes(8 * 1024), Charsets.UTF_8)
+                }
+                text.contains("<root", ignoreCase = true) ||
+                    text.contains("DigitalImaging", ignoreCase = true)
+            }
+        } catch (_: Exception) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     fun parseDd(ddXml: String): List<UpnpService> {
         val blocks = Regex("<service>(.*?)</service>", RegexOption.DOT_MATCHES_ALL)
             .findAll(ddXml).map { it.groupValues[1] }.toList()

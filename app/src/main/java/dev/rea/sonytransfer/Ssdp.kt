@@ -24,20 +24,26 @@ object Ssdp {
                     network?.bindSocket(socket)
                 } catch (_: Exception) {
                 }
-                socket.soTimeout = 600
-                for (st in SEARCH_TARGETS) {
-                    val message = "M-SEARCH * HTTP/1.1\r\n" +
-                        "HOST: $SSDP_ADDR:$SSDP_PORT\r\n" +
-                        "MAN: \"ssdp:discover\"\r\n" +
-                        "MX: 2\r\n" +
-                        "ST: $st\r\n\r\n"
-                    val data = message.toByteArray(Charsets.US_ASCII)
-                    try {
-                        socket.send(DatagramPacket(data, data.size, target, SSDP_PORT))
-                    } catch (_: Exception) {
+                socket.soTimeout = 500
+
+                fun sendSearch() {
+                    for (st in SEARCH_TARGETS) {
+                        val message = "M-SEARCH * HTTP/1.1\r\n" +
+                            "HOST: $SSDP_ADDR:$SSDP_PORT\r\n" +
+                            "MAN: \"ssdp:discover\"\r\n" +
+                            "MX: 1\r\n" +
+                            "ST: $st\r\n\r\n"
+                        val data = message.toByteArray(Charsets.US_ASCII)
+                        try {
+                            socket.send(DatagramPacket(data, data.size, target, SSDP_PORT))
+                        } catch (_: Exception) {
+                        }
                     }
                 }
+
+                sendSearch()
                 val deadline = System.currentTimeMillis() + timeoutMs
+                var nextSendAt = System.currentTimeMillis() + 600
                 val buffer = ByteArray(4096)
                 while (System.currentTimeMillis() < deadline) {
                     try {
@@ -53,6 +59,12 @@ object Ssdp {
                             mediaServerLocation = location
                         }
                     } catch (_: Exception) {
+                    }
+                    // 相机偶尔会丢第一个 M-SEARCH：每 600–700ms 重发一次，避免空等到超时。
+                    val now = System.currentTimeMillis()
+                    if (now >= nextSendAt && now < deadline) {
+                        sendSearch()
+                        nextSendAt = now + 700
                     }
                 }
             }

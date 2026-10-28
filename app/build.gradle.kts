@@ -11,8 +11,8 @@ android {
         applicationId = "dev.rea.sonytransfer"
         minSdk = 24
         targetSdk = 34
-        versionCode = 14
-        versionName = "0.10.1"
+        versionCode = 15
+        versionName = "0.10.2"
     }
 
     buildTypes {

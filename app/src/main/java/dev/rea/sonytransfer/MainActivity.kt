@@ -15,6 +15,9 @@ import android.graphics.Matrix
 import android.graphics.Typeface
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.content.res.Configuration
@@ -47,6 +50,11 @@ import java.util.TimeZone
 
 class MainActivity : Activity() {
 
+    private companion object {
+        private const val PREFS = "sony_camera"
+        private const val KEY_BASE_URL = "camera_base_url"
+    }
+
     private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap?)
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -71,6 +79,7 @@ class MainActivity : Activity() {
 
     // 状态
     private lateinit var cameraWifi: CameraWifi
+    private lateinit var connectivityManager: ConnectivityManager
     private var nfcAdapter: NfcAdapter? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var lastNfc: CameraNfcInfo? = null
@@ -90,6 +99,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraWifi = CameraWifi(this)
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         buildUi()
         requestWifiPermissions()
@@ -431,16 +441,124 @@ class MainActivity : Activity() {
             return
         }
         busy = true
-        appendLog("连接相机 Wi-Fi: $ssid")
         acquireMulticast()
+        val startedAt = SystemClock.elapsedRealtime()
+        appendLog("连接相机 Wi-Fi: $ssid")
+
+        // 手机 Wi-Fi 已经连在相机热点上（例如用户手动连过）：直接复用，不走系统确认框。
+        if (tryReuseCameraNetwork()) {
+            busy = false
+            val message = "已复用现有相机 Wi-Fi：$ssid（${SystemClock.elapsedRealtime() - startedAt}ms）"
+            appendLog(message)
+            statusView.text = message
+            onConnected()
+            return
+        }
+
         cameraWifi.connect(ssid, pass) { ok, message ->
             mainHandler.post {
                 busy = false
-                appendLog(message)
-                statusView.text = message
+                val cost = SystemClock.elapsedRealtime() - startedAt
+                val line = "$message（耗时 ${cost}ms）"
+                appendLog(line)
+                statusView.text = line
                 if (ok) onConnected() else appendLog("连接失败，可重试或检查相机是否在传输模式")
             }
         }
+    }
+
+    /**
+     * 复用已连上的相机热点（无 Internet 的 Wi-Fi）：临时绑定该网络探测 dd.xml，
+     * 命中就直接跳过 WifiNetworkSpecifier 的系统确认框和重新关联，通常可省 3–8 秒。
+     */
+    private fun tryReuseCameraNetwork(): Boolean {
+        if (cameraWifi.network != null) return false
+        val net = findCameraWifiNetwork() ?: return false
+        val previous = connectivityManager.boundNetworkForProcess
+        return try {
+            connectivityManager.bindProcessToNetwork(net)
+            val base = probeKnownBases(net, 500)
+            if (base == null) {
+                connectivityManager.bindProcessToNetwork(previous)
+                false
+            } else {
+                cameraBase = base
+                rememberBaseUrl(base)
+                cameraWifi.attachExisting(net)
+                appendLog("探测到相机: $base（复用已连接 Wi-Fi）")
+                true
+            }
+        } catch (_: Exception) {
+            connectivityManager.bindProcessToNetwork(previous)
+            false
+        }
+    }
+
+    /**
+     * 找手机当前已连上、但没有 Internet 的 Wi-Fi 网络（相机热点特征）。
+     * 正常上网 Wi-Fi 会直接跳过，不做无谓探测。
+     */
+    private fun findCameraWifiNetwork(): Network? {
+        val networks = try {
+            connectivityManager.allNetworks
+        } catch (_: Exception) {
+            return null
+        }
+        return networks.firstOrNull { net ->
+            val caps = connectivityManager.getNetworkCapabilities(net) ?: return@firstOrNull false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+    }
+
+    /**
+     * 依次探测已知/猜测的相机地址：上次成功的地址 → NFC 里的 DD 主机 → 默认网关 →
+     * 常见固定 IP。命中任一即返回，全部失败返回 null。
+     */
+    private fun probeKnownBases(network: Network?, timeoutMsPerBase: Int): String? {
+        val candidates = LinkedHashSet<String>()
+        cachedBaseUrl()?.let { candidates += it }
+        cameraBase?.let { candidates += it }
+        lastNfc?.ddUrl?.let { dd ->
+            Regex("(https?://[^/]+)").find(dd)?.let { candidates += it.groupValues[1] }
+        }
+        gatewayBaseUrls(network).forEach { candidates += it }
+        candidates += "http://192.168.122.1:64321"
+        for (base in candidates) {
+            if (Upnp.probeCamera(base, timeoutMsPerBase)) return base
+        }
+        return null
+    }
+
+    /** 从网络默认网关 / DHCP 服务器推导相机地址（索尼相机通常就是网关）。 */
+    private fun gatewayBaseUrls(network: Network?): List<String> {
+        val net = network ?: return emptyList()
+        val props = try {
+            connectivityManager.getLinkProperties(net)
+        } catch (_: Exception) {
+            null
+        } ?: return emptyList()
+        val hosts = LinkedHashSet<String>()
+        props.routes.forEach { route ->
+            if (route.isDefaultRoute) {
+                route.gateway?.hostAddress?.let { host ->
+                    if (!host.contains(':')) hosts += host
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            props.dhcpServerAddress?.hostAddress?.let { host ->
+                if (!host.contains(':')) hosts += host
+            }
+        }
+        return hosts.map { "http://$it:64321" }
+    }
+
+    private fun cachedBaseUrl(): String? =
+        getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_BASE_URL, null)
+
+    private fun rememberBaseUrl(base: String) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_BASE_URL, base).apply()
     }
 
     private fun ensureConnected(action: () -> Unit) {
@@ -462,19 +580,27 @@ class MainActivity : Activity() {
 
     private fun resolveBaseUrl(): String? {
         cameraBase?.let { return it }
-        val location = Ssdp.findCameraLocation(cameraWifi.network, 6000)
-        if (location != null) {
-            appendLog("SSDP: $location")
-            Regex("(https?://[^/]+)").find(location)?.let {
-                cameraBase = it.groupValues[1]
-                return cameraBase
-            }
+        val startedAt = SystemClock.elapsedRealtime()
+        val network = cameraWifi.network
+
+        // 先探测已知地址（上次成功地址、NFC DD、网关、常见固定 IP）：通常几十毫秒命中，
+        // 比等 SSDP 广播快得多；只有全部失败才退回 SSDP。
+        probeKnownBases(network, 900)?.let { base ->
+            cameraBase = base
+            rememberBaseUrl(base)
+            appendLog("相机地址: $base（探测命中 ${SystemClock.elapsedRealtime() - startedAt}ms）")
+            return base
         }
-        lastNfc?.ddUrl?.let { dd ->
-            appendLog("NFC DD URL: $dd")
-            Regex("(https?://[^/]+)").find(dd)?.let {
-                cameraBase = it.groupValues[1]
-                return cameraBase
+
+        appendLog("地址探测未命中，改用 SSDP（最多 3s）…")
+        val location = Ssdp.findCameraLocation(network, 3000)
+        if (location != null) {
+            appendLog("SSDP: $location（${SystemClock.elapsedRealtime() - startedAt}ms）")
+            val base = Regex("(https?://[^/]+)").find(location)?.groupValues?.get(1)
+            if (base != null) {
+                cameraBase = base
+                rememberBaseUrl(base)
+                return base
             }
         }
         appendLog("SSDP 未发现相机，尝试默认地址 http://192.168.122.1:64321")
@@ -988,6 +1114,14 @@ class MainActivity : Activity() {
         mainHandler.post {
             val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
             logView.append("[$time] $line\n")
+            // 日志框铺满后自动滚到最新一行
+            logView.post logScroll@{
+                val layout = logView.layout ?: return@logScroll
+                if (layout.lineCount > 0) {
+                    val bottom = layout.getLineBottom(layout.lineCount - 1)
+                    logView.scrollTo(0, (bottom - logView.height).coerceAtLeast(0))
+                }
+            }
         }
     }
 }
