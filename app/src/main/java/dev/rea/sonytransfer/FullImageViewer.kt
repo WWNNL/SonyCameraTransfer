@@ -172,6 +172,15 @@ class FullImageViewer(
         toggleButton.setOnClickListener {
             sidebar.visibility = if (sidebar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
+        // 侧栏默认收起：否则右侧 190dp 区域会被浮层挡住，看起来像「有些位置不能缩放」。
+        sidebar.visibility = View.GONE
+        // 点一下画面就收起侧栏，让整屏恢复可缩放。
+        zoomView?.onSingleTap = {
+            if (sidebar.visibility == View.VISIBLE) sidebar.visibility = View.GONE
+        }
+        videoPlayer?.onBeforeTap = {
+            if (sidebar.visibility == View.VISIBLE) sidebar.visibility = View.GONE
+        }
         closeButton.setOnClickListener { dialog.dismiss() }
 
         dialog.setContentView(root)
@@ -364,6 +373,9 @@ class ZoomImageView(context: Context) : ImageView(context) {
     private val suppMatrix = Matrix()
     private val matrixValues = FloatArray(9)
 
+    /** 单击（非双击/非拖动/非缩放）回调：用来点一下画面收起侧栏。 */
+    var onSingleTap: (() -> Unit)? = null
+
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -390,12 +402,19 @@ class ZoomImageView(context: Context) : ImageView(context) {
                 distanceX: Float,
                 distanceY: Float,
             ): Boolean {
+                // 双指缩放过程中不要同时拖动，否则拖拽量会带偏缩放中心。
+                if (scaleDetector.isInProgress) return true
                 if (currentScale() > 1.01f) {
                     suppMatrix.postTranslate(-distanceX, -distanceY)
                     applyMatrix()
                     return true
                 }
                 return false
+            }
+
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                onSingleTap?.invoke()
+                return true
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -426,6 +445,9 @@ class ZoomImageView(context: Context) : ImageView(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            parent?.requestDisallowInterceptTouchEvent(true)
+        }
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP ||
@@ -442,9 +464,12 @@ class ZoomImageView(context: Context) : ImageView(context) {
     }
 
     private fun applyMatrix() {
+        // display = suppMatrix × baseMatrix：supp 在“屏幕坐标”里叠加。
+        // 这样 pinch 的 focusX/focusY（屏幕坐标）才是真正的缩放中心，
+        // 拖动位移方向/速度也才对，旋转 90° 之后同样成立。
         val display = Matrix().apply {
-            set(suppMatrix)
-            postConcat(baseMatrix)
+            set(baseMatrix)
+            postConcat(suppMatrix)
         }
         imageMatrix = display
     }
@@ -471,8 +496,8 @@ class ZoomImageView(context: Context) : ImageView(context) {
         val drawable = drawable ?: return
         if (width <= 0 || height <= 0) return
         val display = Matrix().apply {
-            set(suppMatrix)
-            postConcat(baseMatrix)
+            set(baseMatrix)
+            postConcat(suppMatrix)
         }
         val rect = RectF(
             0f, 0f,

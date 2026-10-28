@@ -166,8 +166,10 @@ object Upnp {
             if (c.responseCode != 200) {
                 false
             } else {
-                val text = c.inputStream.use {
-                    String(it.readBytes(8 * 1024), Charsets.UTF_8)
+                val text = c.inputStream.use { input ->
+                    val buffer = ByteArray(8 * 1024)
+                    val n = input.read(buffer)
+                    if (n <= 0) "" else String(buffer, 0, n, Charsets.UTF_8)
                 }
                 text.contains("<root", ignoreCase = true) ||
                     text.contains("DigitalImaging", ignoreCase = true)

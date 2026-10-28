@@ -35,12 +35,27 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
     private val playButton = Button(context)
     private val seekBar = SeekBar(context)
     private val timeText = TextView(context)
+    private val bar = LinearLayout(context)
+
+    /** 点一下画面时先执行（例如收起侧栏），再切换播放/暂停。 */
+    var onBeforeTap: (() -> Unit)? = null
 
     private var pendingUri: Uri? = null
     private var prepared = false
     private var durationMs = 0
     private var userSeeking = false
     private val density = context.resources.displayMetrics.density
+
+    /** 控制条 4 秒无操作自动隐藏，把整块画面让给缩放手势。 */
+    private val hideControls = object : Runnable {
+        override fun run() {
+            if (userSeeking) {
+                handler.postDelayed(this, 1000)
+                return
+            }
+            bar.visibility = View.GONE
+        }
+    }
 
     init {
         setBackgroundColor(0xFF000000.toInt())
@@ -49,7 +64,7 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
 
-        val bar = LinearLayout(context).apply {
+        bar.apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(0x99000000.toInt())
@@ -60,7 +75,10 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             textSize = 16f
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0x00000000)
-            setOnClickListener { togglePlay() }
+            setOnClickListener {
+                togglePlay()
+                showControlsTemporarily()
+            }
         }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -105,7 +123,13 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             mediaPlayer.setSurface(Surface(surfaceTexture))
             pendingUri?.let { prepare(it) }
         }
-        textureView.onTap = { togglePlay() }
+        textureView.onTap = {
+            onBeforeTap?.invoke()
+            togglePlay()
+            showControlsTemporarily()
+        }
+        // 双指按下/拖动时也让控制条复位，避免它一直占住底部一条。
+        textureView.onTouchDown = { showControlsTemporarily() }
 
         mediaPlayer.setOnPreparedListener { mp ->
             prepared = true
@@ -115,11 +139,14 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
             mp.start()
             updatePlayButton()
             updateProgressLoop()
+            showControlsTemporarily()
         }
         mediaPlayer.setOnVideoSizeChangedListener { _, width, height ->
             textureView.setVideoSize(width, height)
         }
         mediaPlayer.setOnCompletionListener {
+            // 播放结束/停止后控制条也会自动收起，之后整屏都能双指缩放。
+            showControlsTemporarily()
             updatePlayButton()
             seekBar.progress = 0
             timeText.text = "0:00 / ${formatTime(durationMs.toLong())}"
@@ -163,10 +190,17 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         if (!prepared) return
         if (mediaPlayer.isPlaying) mediaPlayer.pause() else mediaPlayer.start()
         updatePlayButton()
+        showControlsTemporarily()
     }
 
     private fun updatePlayButton() {
         playButton.text = if (prepared && mediaPlayer.isPlaying) "⏸" else "▶"
+    }
+
+    private fun showControlsTemporarily() {
+        bar.visibility = View.VISIBLE
+        handler.removeCallbacks(hideControls)
+        handler.postDelayed(hideControls, 4000)
     }
 
     private fun updateProgressLoop() {
@@ -189,6 +223,8 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         runCatching { mediaPlayer.release() }
         textureView.onSurfaceReady = null
         textureView.onTap = null
+        textureView.onTouchDown = null
+        onBeforeTap = null
     }
 
     private fun formatTime(millis: Long): String {
@@ -205,12 +241,17 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     var onSurfaceReady: ((SurfaceTexture) -> Unit)? = null
     var onTap: (() -> Unit)? = null
 
+    /** 手指按下时回调（用于让控制条短暂出现）。 */
+    var onTouchDown: (() -> Unit)? = null
+
     private val baseMatrix = Matrix()
     private val suppMatrix = Matrix()
     private val matrixValues = FloatArray(9)
     private var videoWidth = 0
     private var videoHeight = 0
     private var rotationDegrees = 0
+    private var lastTextureWidth = -1
+    private var lastTextureHeight = -1
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -237,6 +278,7 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
                 distanceX: Float,
                 distanceY: Float,
             ): Boolean {
+                if (scaleDetector.isInProgress) return true
                 if (currentScale() > 1.01f) {
                     suppMatrix.postTranslate(-distanceX, -distanceY)
                     applyTransform()
@@ -272,6 +314,10 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        // 只有纹理尺寸真的变化才重置基准；暂停/停止播放时若重复回调，会把用户刚做的缩放清掉。
+        if (width == lastTextureWidth && height == lastTextureHeight) return
+        lastTextureWidth = width
+        lastTextureHeight = height
         resetBase()
     }
 
@@ -297,6 +343,10 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            parent?.requestDisallowInterceptTouchEvent(true)
+            onTouchDown?.invoke()
+        }
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP ||
@@ -313,11 +363,15 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     }
 
     private fun applyTransform() {
+        // display = suppMatrix × baseMatrix：supp 在“屏幕坐标”里叠加，
+        // 这样 pinch 的 focusX/focusY（屏幕坐标）才是真正的缩放中心。
+        // 暂停/停止播放时 TextureView 可能不再出帧，主动 invalidate() 让变换立刻可见。
         val display = Matrix().apply {
-            set(suppMatrix)
-            postConcat(baseMatrix)
+            set(baseMatrix)
+            postConcat(suppMatrix)
         }
         setTransform(display)
+        invalidate()
     }
 
     /**
@@ -374,8 +428,8 @@ class ZoomTextureView(context: Context) : TextureView(context), TextureView.Surf
     private fun clampTransform() {
         if (videoWidth <= 0 || videoHeight <= 0 || width == 0 || height == 0) return
         val display = Matrix().apply {
-            set(suppMatrix)
-            postConcat(baseMatrix)
+            set(baseMatrix)
+            postConcat(suppMatrix)
         }
         // 视频在视图里实际占用的矩形：默认铺满的视图矩形经过 base 变换后的范围
         val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())

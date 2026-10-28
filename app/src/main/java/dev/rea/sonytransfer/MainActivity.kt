@@ -445,26 +445,30 @@ class MainActivity : Activity() {
         val startedAt = SystemClock.elapsedRealtime()
         appendLog("连接相机 Wi-Fi: $ssid")
 
-        // 手机 Wi-Fi 已经连在相机热点上（例如用户手动连过）：直接复用，不走系统确认框。
-        if (tryReuseCameraNetwork()) {
-            busy = false
-            val message = "已复用现有相机 Wi-Fi：$ssid（${SystemClock.elapsedRealtime() - startedAt}ms）"
-            appendLog(message)
-            statusView.text = message
-            onConnected()
-            return
-        }
-
-        cameraWifi.connect(ssid, pass) { ok, message ->
+        // 复用检查要探测 dd.xml，放到后台线程，避免卡 UI。
+        Thread {
+            val reused = tryReuseCameraNetwork()
             mainHandler.post {
-                busy = false
-                val cost = SystemClock.elapsedRealtime() - startedAt
-                val line = "$message（耗时 ${cost}ms）"
-                appendLog(line)
-                statusView.text = line
-                if (ok) onConnected() else appendLog("连接失败，可重试或检查相机是否在传输模式")
+                if (reused) {
+                    busy = false
+                    val message = "已复用现有相机 Wi-Fi：$ssid（${SystemClock.elapsedRealtime() - startedAt}ms）"
+                    appendLog(message)
+                    statusView.text = message
+                    onConnected()
+                    return@post
+                }
+                cameraWifi.connect(ssid, pass) { ok, message ->
+                    mainHandler.post {
+                        busy = false
+                        val cost = SystemClock.elapsedRealtime() - startedAt
+                        val line = "$message（耗时 ${cost}ms）"
+                        appendLog(line)
+                        statusView.text = line
+                        if (ok) onConnected() else appendLog("连接失败，可重试或检查相机是否在传输模式")
+                    }
+                }
             }
-        }
+        }.start()
     }
 
     /**

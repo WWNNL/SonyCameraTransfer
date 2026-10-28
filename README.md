@@ -8,8 +8,10 @@
 ## 功能（MVP 已实现）
 
 1. **NFC 一碰**：读 `application/x-sony-pmm` 标签 → 解析 SSID / 密码 / IP / DD-URL（按官方语义校验）。
-2. **连相机 Wi-Fi**：Android 10+ 用 `WifiNetworkSpecifier`（系统确认一次），并 `bindProcessToNetwork`。
-3. **发现**：SSDP M-SEARCH（`DigitalImaging` / `MediaServer`）→ `dd.xml`。
+2. **连相机 Wi-Fi**：Android 10+ 用 `WifiNetworkSpecifier`（系统确认一次），并 `bindProcessToNetwork`；
+   若手机已连在相机热点（无 Internet 的 Wi-Fi）上，则直接复用该网络（跳过系统确认框）。
+3. **发现**：优先探测已知地址（上次成功地址缓存 / NFC DD 主机 / 默认网关 / 固定 IP）的 `dd.xml`，
+   全部未命中才用 SSDP M-SEARCH（`DigitalImaging` / `MediaServer`，3s 超时、期间重发）。
 4. **接收（在本机上选择 / 相机端选图推送）**：
    - `X_TransferStart` → `X_GetPushRoot` → `ContentDirectory#Browse("PushRoot")` → 逐张 `X_TransferProgress` + GET 原图 → `X_TransferEnd`；
    - 单张快路径：`/DigitalImagingDesc.xml` 的 `X_CurrentContent_URL`；
@@ -42,7 +44,7 @@ export JAVA_HOME='C:\Program Files\Java\jdk-21'
 E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 ```
 
-产物：`app/build/outputs/apk/debug/app-debug.apk`（已构建成功，约 850 KB）。
+产物：`app/build/outputs/apk/debug/app-debug.apk`（已构建成功，约 870 KB）。
 `local.properties` 指向本机 SDK：`E:/Projects/REAProjects/toolchain/android-sdk`；
 用 Android Studio 打开时改成本机 SDK 路径即可。
 
@@ -52,6 +54,7 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
 
 1. 相机：「发送到智能手机 → 在本机上选择」→ 选好照片 → 屏幕出现 SSID/密码 +「正在连接…」。
 2. 手机：打开 App → 贴相机 NFC（或手动填 SSID/密码）→ App 自动连 Wi-Fi、发现、接收、保存。
+   想更快：可先在系统 Wi-Fi 设置里手动连上相机热点，App 会直接复用该网络（不弹系统确认框、不再重新关联）。
 3. 传输时 App 显示总进度 / 当前图片进度 / 实时速度，并预览当前照片；底部缩略图条累积所有已接收图片，点击可看大图。
 4. 照片保存到相册 `Pictures/SonyTransfer`；传完相机会自动退出图传并关闭热点（`X_TransferEnd` 后），属正常。
 5. 如果照片日期不对（相机没电后时钟归零会变成 2016）：点缩略图进全屏 → 侧栏「修改日期」单张修正；或主界面「按偏移量改日期」整批平移（保留相对时间差）。
@@ -81,6 +84,8 @@ E:/Projects/REAProjects/toolchain/gradle-8.9/bin/gradle assembleDebug
   因此浏览模式已移除（PC P0 当时只有 1 张样本，误判为全量相册，已更正文档）。
 - 视频（MP4/XAVC S）、HEIF、RAW 未处理。
 - 国产 ROM 的 Wi-Fi 绑定/后台限制兼容性待真机验证（目前只测了一台设备）。
+- Android 10+ 首次连接未知相机热点时，系统的「连接到此 WLAN？」确认框无法绕过（系统安全限制）；
+  连过之后可在系统 Wi-Fi 设置里保留该网络，App 下次会直接复用。
 - 相机传完即关热点，一次会话只接收一批；要再传需重新进相机菜单。
 
 ## 真机验证记录
