@@ -26,6 +26,90 @@ object ImageSaver {
         }
     }
 
+    /**
+     * 从临时文件保存（流式复制，不再把大文件整块读进内存）。
+     * 视频可达数百 MB，用 ByteArray 版本容易 OOM / GC 卡死。
+     */
+    fun saveFromFile(context: Context, rawName: String, mime: String, file: File): Uri? {
+        if (!file.exists() || file.length() <= 0) return null
+        val name = safeName(rawName, mime)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                saveFileViaMediaStore(context, name, mime, file)
+            } else {
+                saveFileLegacy(context, name, mime, file)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun saveFileViaMediaStore(
+        context: Context,
+        name: String,
+        mime: String,
+        file: File,
+    ): Uri? {
+        val resolver = context.contentResolver
+        val video = isVideo(mime)
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath(video))
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val collection = if (video) {
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+        val uri = resolver.insert(collection, values) ?: return null
+        var written = false
+        try {
+            resolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { input -> input.copyTo(out, 256 * 1024) }
+                written = true
+            }
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+        if (!written) {
+            runCatching { resolver.delete(uri, null, null) }
+            return null
+        }
+        val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+        resolver.update(uri, done, null, null)
+        return uri
+    }
+
+    @Suppress("DEPRECATION")
+    private fun saveFileLegacy(context: Context, name: String, mime: String, file: File): Uri? {
+        val video = isVideo(mime)
+        val dir = File(
+            Environment.getExternalStoragePublicDirectory(
+                if (video) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES,
+            ),
+            "SonyTransfer",
+        )
+        if (!dir.exists() && !dir.mkdirs()) return null
+        var target = File(dir, name)
+        var index = 1
+        while (target.exists()) {
+            target = File(
+                dir,
+                "${name.substringBeforeLast('.')}_${index++}.${name.substringAfterLast('.')}",
+            )
+        }
+        file.inputStream().use { input ->
+            target.outputStream().use { out -> input.copyTo(out, 256 * 1024) }
+        }
+        android.media.MediaScannerConnection.scanFile(
+            context, arrayOf(target.absolutePath), arrayOf(mime), null,
+        )
+        return Uri.fromFile(target)
+    }
+
     private fun saveViaMediaStore(
         context: Context,
         name: String,

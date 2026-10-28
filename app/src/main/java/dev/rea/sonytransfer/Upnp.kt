@@ -1,6 +1,10 @@
 package dev.rea.sonytransfer
 
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.io.SocketTimeoutException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -11,6 +15,9 @@ data class ResEntry(
     val url: String,
     val sizeHint: Long?,
 )
+
+/** 用户主动取消接收。 */
+class DownloadCancelledException : Exception("已取消接收")
 
 /** 浏览结果：可能是目录（container）也可能是照片/视频（item）。 */
 data class BrowseEntry(
@@ -147,6 +154,106 @@ object Upnp {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * 断点续传式流式下载：相机传到一半停住时不再无限等待。
+     *
+     *  - 读超时 = stallTimeoutMs，超过即判定"停滞"，用 HTTP Range 从已收字节续传（最多 maxAttempts 次）；
+     *  - 相机不支持 Range（续传请求返回 200）时自动从头重下；
+     *  - 全程只写文件，不把整张原图/视频读进内存（几百 MB 的 MP4 也不会 OOM）；
+     *  - 每约 150ms 回调一次进度；返回最终落盘字节数。
+     */
+    fun downloadToFile(
+        url: String,
+        target: File,
+        stallTimeoutMs: Int = 15_000,
+        maxAttempts: Int = 3,
+        onProgress: ((Long, Long) -> Unit)? = null,
+        shouldCancel: (() -> Boolean)? = null,
+        log: ((String) -> Unit)? = null,
+    ): Long {
+        target.parentFile?.mkdirs()
+        var received = 0L
+        var total = 0L
+        var lastError: Exception? = null
+        for (attempt in 1..maxAttempts) {
+            if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
+            if (attempt > 1) runCatching { Thread.sleep(400) }
+            var conn: HttpURLConnection? = null
+            try {
+                conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 10_000
+                conn.readTimeout = stallTimeoutMs
+                conn.setRequestProperty("Connection", "close")
+                // 要求原始字节，避免相机对任何内容做传输编码导致长度对不上
+                conn.setRequestProperty("Accept-Encoding", "identity")
+                if (received > 0) conn.setRequestProperty("Range", "bytes=$received-")
+
+                val append: Boolean
+                when (val code = conn.responseCode) {
+                    206 -> { // 续传成功
+                        append = true
+                        total = received + conn.contentLengthLong
+                    }
+                    200 -> { // 相机忽略 Range，从头下
+                        append = false
+                        received = 0L
+                        total = conn.contentLengthLong.takeIf { it > 0 } ?: 0L
+                    }
+                    else -> throw IllegalStateException("HTTP $code")
+                }
+
+                FileOutputStream(target, append).use { fos ->
+                    conn.inputStream.use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var lastReportAt = 0L
+                        while (true) {
+                            if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
+                            val n = try {
+                                input.read(buffer)
+                            } catch (e: SocketTimeoutException) {
+                                throw IOException("超过 ${stallTimeoutMs / 1000}s 没有收到数据", e)
+                            }
+                            if (n < 0) break
+                            fos.write(buffer, 0, n)
+                            received += n
+                            val now = System.currentTimeMillis()
+                            if (onProgress != null && (now - lastReportAt >= 150 || n < buffer.size)) {
+                                onProgress(received, if (total > 0) total else 0L)
+                                lastReportAt = now
+                            }
+                        }
+                    }
+                }
+
+                if (total > 0 && received < total) {
+                    lastError = IOException("连接提前结束：$received/$total")
+                    log?.invoke(
+                        "下载提前结束（${received / 1024} KB / ${total / 1024} KB），" +
+                            "第 $attempt/$maxAttempts 次续传…",
+                    )
+                    continue
+                }
+                onProgress?.invoke(received, if (total > 0) total else received)
+                return received
+            } catch (e: DownloadCancelledException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt >= maxAttempts) break
+                log?.invoke(
+                    "下载中断（已收 ${received / 1024} KB）：${e.javaClass.simpleName}，" +
+                        "第 $attempt/$maxAttempts 次重试…",
+                )
+            } finally {
+                conn?.disconnect()
+            }
+        }
+        throw IOException(
+            "下载失败（已收 ${received / 1024} KB，重试 $maxAttempts 次）：" +
+                (lastError?.message ?: "未知错误"),
+        )
     }
 
     /**

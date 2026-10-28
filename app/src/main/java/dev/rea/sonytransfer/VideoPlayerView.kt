@@ -44,6 +44,8 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
     private var prepared = false
     private var durationMs = 0
     private var userSeeking = false
+    /** 按下时控制条是否处于隐藏状态：隐藏时单击只负责唤出控制条，不误触发播放/暂停。 */
+    private var barHiddenOnDown = false
     private val density = context.resources.displayMetrics.density
 
     /** 控制条 4 秒无操作自动隐藏，把整块画面让给缩放手势。 */
@@ -125,11 +127,19 @@ class VideoPlayerView(context: Context) : FrameLayout(context) {
         }
         textureView.onTap = {
             onBeforeTap?.invoke()
-            togglePlay()
-            showControlsTemporarily()
+            // 控制条本来是隐藏的：这一下只把它唤出来（标准的"点画面显示控制条"），不切换播放。
+            if (barHiddenOnDown) {
+                showControlsTemporarily()
+            } else {
+                togglePlay()
+            }
+            barHiddenOnDown = false
         }
         // 双指按下/拖动时也让控制条复位，避免它一直占住底部一条。
-        textureView.onTouchDown = { showControlsTemporarily() }
+        textureView.onTouchDown = {
+            barHiddenOnDown = bar.visibility != View.VISIBLE
+            showControlsTemporarily()
+        }
 
         mediaPlayer.setOnPreparedListener { mp ->
             prepared = true

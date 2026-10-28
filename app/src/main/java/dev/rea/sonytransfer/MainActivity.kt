@@ -42,6 +42,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -85,6 +86,9 @@ class MainActivity : Activity() {
     private var lastNfc: CameraNfcInfo? = null
     private var busy = false
     private var cameraBase: String? = null
+
+    /** 当前接收客户端（「断开」按钮在传输中用它取消本次接收）。 */
+    private var activeClient: SonyCameraClient? = null
 
     // 接收/进度状态
     private val receivedImages = ArrayList<ReceivedImage>()
@@ -281,6 +285,14 @@ class MainActivity : Activity() {
         }
         receiveButton.setOnClickListener { ensureConnected { startReceive() } }
         disconnectButton.setOnClickListener {
+            val client = activeClient
+            if (busy && client != null) {
+                // 传输中：先取消本次接收（相机端会自动退出图传），再点一次才断开网络
+                client.cancel()
+                statusView.text = "正在取消接收…"
+                appendLog("正在取消接收（已收到的文件会保留）…")
+                return@setOnClickListener
+            }
             cameraWifi.disconnect()
             releaseMulticast()
             cameraBase = null
@@ -628,7 +640,8 @@ class MainActivity : Activity() {
                 return@Thread
             }
             appendLog("相机 base URL: $base")
-            val client = SonyCameraClient { line -> appendLog(line) }
+            val client = SonyCameraClient(cacheDir) { line -> appendLog(line) }
+            activeClient = client
             val result = client.receivePush(
                 baseUrl = base,
                 onItems = { items -> mainHandler.post { onReceiveItems(items) } },
@@ -642,24 +655,25 @@ class MainActivity : Activity() {
                     }
                 },
                 onProgress = { progress -> mainHandler.post { renderProgress(progress) } },
-                save = { name, mime, data ->
-                    val uri = ImageSaver.save(applicationContext, name, mime, data)
+                save = { name, mime, file ->
+                    val size = file.length()
+                    val uri = ImageSaver.saveFromFile(applicationContext, name, mime, file)
                     if (uri != null) {
-                        receivedBytes += data.size
+                        receivedBytes += size
                         val isVideo = ImageSaver.isVideo(mime)
                         appendLog(
                             String.format(
                                 Locale.US, "已保存 %s (%.1f MB)%s",
-                                name, data.size / 1048576.0,
+                                name, size / 1048576.0,
                                 if (isVideo) " · 视频" else "",
                             ),
                         )
-                        val thumb = if (isVideo) decodeVideoFrame(uri) else decodePreview(data, 320)
-                        val big = if (isVideo) thumb else decodePreview(data)
+                        val thumb = if (isVideo) decodeVideoFrame(uri) else decodePreview(file, 320)
+                        val big = if (isVideo) thumb else decodePreview(file)
                         val info = if (isVideo) {
-                            buildVideoInfo(name, uri, mime, data.size.toLong())
+                            buildVideoInfo(name, uri, mime, size)
                         } else {
-                            buildImageInfo(name, uri, data)
+                            buildImageInfo(name, uri, file)
                         }
                         mainHandler.post {
                             currentImageInfo = info
@@ -689,6 +703,7 @@ class MainActivity : Activity() {
                 )
             }
             mainHandler.post {
+                activeClient = null
                 busy = false
                 overallText.text = result.message
                 if (receivedImages.isNotEmpty()) {
@@ -1009,10 +1024,10 @@ class MainActivity : Activity() {
     }
 
     /** 保存时从 JPEG 读取 EXIF，构建图片详情（供侧栏显示）。 */
-    private fun buildImageInfo(name: String, uri: Uri?, data: ByteArray): ImageInfo {
+    private fun buildImageInfo(name: String, uri: Uri?, file: File): ImageInfo {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
-        val exif = runCatching { ExifInterface(ByteArrayInputStream(data)) }.getOrNull()
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val exif = runCatching { ExifInterface(file.absolutePath) }.getOrNull()
         fun attr(tag: String): String? =
             exif?.getAttribute(tag)?.trim()?.takeIf { it.isNotEmpty() }
 
@@ -1027,7 +1042,7 @@ class MainActivity : Activity() {
         return ImageInfo(
             name = name,
             uri = uri,
-            bytes = data.size.toLong(),
+            bytes = file.length(),
             width = bounds.outWidth,
             height = bounds.outHeight,
             takenAt = formatExifDateTime(
@@ -1093,6 +1108,41 @@ class MainActivity : Activity() {
                         ExifInterface.TAG_ORIENTATION,
                         ExifInterface.ORIENTATION_NORMAL,
                     )
+                when (orientation) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } catch (_: Exception) {
+                0f
+            }
+            if (degrees != 0f) {
+                val matrix = Matrix().apply { postRotate(degrees) }
+                bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            }
+            bitmap
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 从落盘的临时文件解码预览（同样先算采样率 + 按 EXIF 旋转），不占大内存。 */
+    private fun decodePreview(file: File, maxDimension: Int = 1280): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            val longest = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longest / sample > maxDimension) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            var bitmap = BitmapFactory.decodeFile(file.absolutePath, options) ?: return null
+            val degrees = try {
+                val orientation = ExifInterface(file.absolutePath).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
                 when (orientation) {
                     ExifInterface.ORIENTATION_ROTATE_90 -> 90f
                     ExifInterface.ORIENTATION_ROTATE_180 -> 180f
