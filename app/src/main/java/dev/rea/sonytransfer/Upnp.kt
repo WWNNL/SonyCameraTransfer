@@ -4,8 +4,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.SocketTimeoutException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 
 data class UpnpService(val serviceType: String, val controlUrl: String, val scpdUrl: String)
@@ -175,37 +175,38 @@ object Upnp {
     ): Long {
         target.parentFile?.mkdirs()
         var received = 0L
-        var total = 0L
+        var total: Long
         var lastError: Exception? = null
         for (attempt in 1..maxAttempts) {
             if (shouldCancel?.invoke() == true) throw DownloadCancelledException()
             if (attempt > 1) runCatching { Thread.sleep(400) }
             var conn: HttpURLConnection? = null
             try {
-                conn = URL(url).openConnection() as HttpURLConnection
-                conn.connectTimeout = 10_000
-                conn.readTimeout = stallTimeoutMs
-                conn.setRequestProperty("Connection", "close")
+                val c = URL(url).openConnection() as HttpURLConnection
+                conn = c
+                c.connectTimeout = 10_000
+                c.readTimeout = stallTimeoutMs
+                c.setRequestProperty("Connection", "close")
                 // 要求原始字节，避免相机对任何内容做传输编码导致长度对不上
-                conn.setRequestProperty("Accept-Encoding", "identity")
-                if (received > 0) conn.setRequestProperty("Range", "bytes=$received-")
+                c.setRequestProperty("Accept-Encoding", "identity")
+                if (received > 0) c.setRequestProperty("Range", "bytes=$received-")
 
                 val append: Boolean
-                when (val code = conn.responseCode) {
+                when (c.responseCode) {
                     206 -> { // 续传成功
                         append = true
-                        total = received + conn.contentLengthLong
+                        total = received + c.contentLengthLong
                     }
                     200 -> { // 相机忽略 Range，从头下
                         append = false
                         received = 0L
-                        total = conn.contentLengthLong.takeIf { it > 0 } ?: 0L
+                        total = c.contentLengthLong.takeIf { it > 0 } ?: 0L
                     }
-                    else -> throw IllegalStateException("HTTP $code")
+                    else -> throw IllegalStateException("HTTP ${c.responseCode}")
                 }
 
                 FileOutputStream(target, append).use { fos ->
-                    conn.inputStream.use { input ->
+                    c.inputStream.use { input ->
                         val buffer = ByteArray(64 * 1024)
                         var lastReportAt = 0L
                         while (true) {

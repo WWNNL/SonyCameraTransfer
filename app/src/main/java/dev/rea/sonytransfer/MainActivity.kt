@@ -13,6 +13,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
@@ -56,7 +57,9 @@ class MainActivity : Activity() {
         private const val KEY_BASE_URL = "camera_base_url"
     }
 
-    private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap?)
+    private class ReceivedImage(var info: ImageInfo, val thumb: Bitmap?) {
+        var cell: FrameLayout? = null
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val density by lazy { resources.displayMetrics.density }
@@ -99,6 +102,7 @@ class MainActivity : Activity() {
     private var receiveStartedAt = 0L
     private var receivedBytes = 0L
     private var currentImageInfo: ImageInfo? = null
+    private var selectedImage: ReceivedImage? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -657,6 +661,9 @@ class MainActivity : Activity() {
                 onProgress = { progress -> mainHandler.post { renderProgress(progress) } },
                 save = { name, mime, file ->
                     val size = file.length()
+                    appendLog(
+                        String.format(Locale.US, "保存 %s (%.1f MB)…", name, size / 1048576.0),
+                    )
                     val uri = ImageSaver.saveFromFile(applicationContext, name, mime, file)
                     if (uri != null) {
                         receivedBytes += size
@@ -681,8 +688,7 @@ class MainActivity : Activity() {
                                 previewImage.setImageBitmap(big)
                                 previewHint.visibility = View.GONE
                             } else if (isVideo) {
-                                previewHint.visibility = View.VISIBLE
-                                previewHint.text = "视频已保存：$name（点缩略图播放）"
+                                showHint("视频已保存：$name（点大图播放）")
                             }
                             addReceivedImage(info, thumb)
                         }
@@ -707,8 +713,7 @@ class MainActivity : Activity() {
                 busy = false
                 overallText.text = result.message
                 if (receivedImages.isNotEmpty()) {
-                    previewHint.visibility = View.VISIBLE
-                    previewHint.text = "共 ${receivedImages.size} 张（点缩略图全屏查看，可双指放大）"
+                    showHint("共 ${receivedImages.size} 张（点缩略图切大图，点大图全屏查看）")
                 }
                 statusView.text = result.message
             }
@@ -723,10 +728,11 @@ class MainActivity : Activity() {
             currentText.text = "当前：—"
             previewImage.setImageDrawable(null)
             previewHint.visibility = View.VISIBLE
-            previewHint.text = "预览区"
+            showHint("预览区", centered = true)
             stripRow.removeAllViews()
             receivedImages.clear()
             currentImageInfo = null
+            selectedImage = null
             updateBatchButton()
             speedIndex = -1
             speedLastBytes = 0L
@@ -741,7 +747,7 @@ class MainActivity : Activity() {
         currentBar.progress = 0
         currentText.text = "当前：等待开始…"
         previewHint.visibility = View.VISIBLE
-        previewHint.text = "共 ${items.size} 张，等待相机开始传送…"
+        showHint("共 ${items.size} 张，等待相机开始传送…")
     }
 
     private fun renderProgress(progress: SonyCameraClient.Progress) {
@@ -800,12 +806,7 @@ class MainActivity : Activity() {
     private fun addReceivedImage(info: ImageInfo, thumb: Bitmap?) {
         val image = ReceivedImage(info, thumb)
         receivedImages.add(image)
-        val click = View.OnClickListener {
-            FullImageViewer(this@MainActivity, image.info) { updated ->
-                image.info = updated
-                if (currentImageInfo?.uri == updated.uri) currentImageInfo = updated
-            }.show()
-        }
+        val click = View.OnClickListener { selectImage(image) }
         val cell = FrameLayout(this).apply {
             if (thumb != null) {
                 addView(
@@ -852,9 +853,58 @@ class MainActivity : Activity() {
         val params = LinearLayout.LayoutParams(dp(64), dp(64))
         params.setMargins(dp(2), 0, dp(2), 0)
         cell.layoutParams = params
+        image.cell = cell
         stripRow.addView(cell)
         stripScroll.post { stripScroll.fullScroll(View.FOCUS_RIGHT) }
+        highlight(image)
         updateBatchButton()
+    }
+
+    /** 选中某张已接收的图片/视频：高亮缩略图，并把它显示到大预览区（不直接进全屏）。 */
+    private fun selectImage(image: ReceivedImage) {
+        highlight(image)
+        currentImageInfo = image.info
+        previewImage.setImageDrawable(null)
+        previewHint.visibility = View.GONE
+        Thread {
+            val bitmap = if (image.info.isVideo) {
+                decodeVideoFrame(image.info.uri)
+            } else {
+                image.info.uri?.let { decodePreview(it) }
+            }
+            mainHandler.post {
+                if (selectedImage !== image) return@post
+                if (bitmap != null) {
+                    previewImage.setImageBitmap(bitmap)
+                    if (image.info.isVideo) {
+                        showHint("视频：${image.info.name}（点大图播放）")
+                    } else {
+                        previewHint.visibility = View.GONE
+                    }
+                } else {
+                    previewImage.setImageDrawable(null)
+                    showHint("${image.info.name}（点大图全屏查看）", centered = true)
+                }
+            }
+        }.start()
+    }
+
+    /** 高亮当前选中的缩略图（用前景描边，不遮挡图片本身）。 */
+    private fun highlight(image: ReceivedImage?) {
+        selectedImage?.cell?.foreground = null
+        selectedImage = image
+        image?.cell?.foreground = GradientDrawable().apply {
+            setStroke(dp(2), Color.parseColor("#FFB300"))
+        }
+    }
+
+    /** 预览区提示文字：默认贴底显示（不压住图片主体），centered=true 时居中。 */
+    private fun showHint(text: String, centered: Boolean = false) {
+        previewHint.visibility = View.VISIBLE
+        previewHint.text = text
+        previewHint.gravity =
+            if (centered) Gravity.CENTER else Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        previewHint.setPadding(0, 0, 0, if (centered) 0 else dp(8))
     }
 
     /** 视频取首帧作为预览图 / 缩略图。 */
@@ -1149,6 +1199,48 @@ class MainActivity : Activity() {
                     ExifInterface.ORIENTATION_ROTATE_270 -> 270f
                     else -> 0f
                 }
+            } catch (_: Exception) {
+                0f
+            }
+            if (degrees != 0f) {
+                val matrix = Matrix().apply { postRotate(degrees) }
+                bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            }
+            bitmap
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 从已入库的 Uri 解码预览（点缩略图切大图时用）：同样先算采样率 + 按 EXIF 旋转。 */
+    private fun decodePreview(uri: Uri, maxDimension: Int = 1280): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            val longest = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longest / sample > maxDimension) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            var bitmap = contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, options)
+            } ?: return null
+            val degrees = try {
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    when (
+                        ExifInterface(stream).getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL,
+                        )
+                    ) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                        ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                        ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                        else -> 0f
+                    }
+                } ?: 0f
             } catch (_: Exception) {
                 0f
             }
